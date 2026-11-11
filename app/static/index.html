@@ -421,7 +421,12 @@ function firewallaTopology() {
 function zscalerTopology() {
   const zia = src("zia"), zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard"), kids = [];
   const fail = (id, t, s) => ({id: id, kind: "cloud", title: t, status: {ok: null, text: "Poll failed"}});
-  if (zia.configured) kids.push(zia.ok ? {id: "zia", kind: "cloud", title: "ZIA", sub: "Internet Access", status: {ok: zia.status === "ACTIVE" ? true : null, text: zia.status === "ACTIVE" ? "Config active" : (zia.status || "Unknown").toLowerCase()}, lines: [zia.locations != null && zia.locations + " locations", zia.url_rules != null && zia.url_rules + " URL rules", zia.fw_rules != null && zia.fw_rules + " firewall rules"]} : fail("zia", "ZIA"));
+  if (zia.configured) { if (zia.ok) { const gre = zia.gre || [], vpn = zia.vpn || [], dcs = {};
+      gre.forEach(t => { [["primary", t.primary_dc, t.primary_vip], ["secondary", t.secondary_dc, t.secondary_vip]].forEach(([role, dc, vip]) => { if (!dc && !vip) return; const key = dc || vip; (dcs[key] = dcs[key] || []).push({name: t.source_ip || t.comment || "GRE tunnel", sub: role.charAt(0).toUpperCase() + role.slice(1) + (vip ? " · " + vip : "") + (t.comment ? " · " + t.comment : "")}); }); });
+      const ch = Object.keys(dcs).sort().map(dc => ({id: "zia:dc:" + dc, kind: "cluster", title: dc, sub: "Zscaler data center", lines: [dcs[dc].length + " GRE tunnel" + (dcs[dc].length === 1 ? "" : "s")], leafTitle: "GRE tunnels", leaves: dcs[dc]}));
+      if (vpn.length) ch.push({id: "zia:vpn", kind: "switch", title: "IPSec VPN", sub: "VPN credentials", lines: [vpn.length + " credential" + (vpn.length === 1 ? "" : "s")], leafTitle: "IPSec tunnels", leaves: vpn.map(v => ({name: v.identity, sub: (v.location || "No location") + (v.type ? " · " + v.type : "") + (v.disabled ? " · disabled" : "")}))});
+      kids.push({id: "zia", kind: "cloud", title: "ZIA", sub: "Internet Access", status: {ok: zia.status === "ACTIVE" ? true : null, text: zia.status === "ACTIVE" ? "Config active" : (zia.status || "Unknown").toLowerCase()},
+        lines: [zia.locations != null && zia.locations + " locations", zia.gre != null && gre.length + " GRE tunnels", zia.vpn != null && vpn.length + " IPSec credentials", zia.url_rules != null && zia.url_rules + " URL rules"], children: ch}); } else kids.push(fail("zia", "ZIA")); }
   const byDc = (prefix, items, dcOf, leaf) => { const m = {}; items.forEach(x => { const k = dcOf(x) || "Not connected"; (m[k] = m[k] || []).push(x); });
     return Object.keys(m).sort().map(k => ({id: prefix + ":" + k, kind: k === "Not connected" ? "other" : "cluster", title: k, sub: k === "Not connected" ? "No data center reported" : "Zscaler data center", status: k === "Not connected" ? {ok: null, text: "No connection"} : null, lines: [m[k].length + " connector" + (m[k].length === 1 ? "" : "s")], leafTitle: "Connectors", leaves: m[k].map(leaf)})); };
   if (zpa.configured) { if (zpa.ok) { const groups = {}; zpa.connectors.forEach(c => { (groups[c.group || "App Connectors"] = groups[c.group || "App Connectors"] || []).push(c); });
@@ -472,7 +477,7 @@ function zsPanel(name, title, build) {
 }
 function zsPanels() {
   return $("div", {class: "grid4"},
-    zsPanel("zia", "ZIA · Internet Access", s => [kv("Configuration", s.status === "ACTIVE" ? "Active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn"), kv("URL filtering rules", s.url_rules), kv("Firewall rules", s.fw_rules), kv("Locations", s.locations)]),
+    zsPanel("zia", "ZIA · Internet Access", s => [kv("Configuration", s.status === "ACTIVE" ? "Active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn"), kv("GRE tunnels", s.gre == null ? null : s.gre.length), kv("IPSec VPN credentials", s.vpn == null ? null : s.vpn.length), kv("Locations", s.locations), kv("URL filtering rules", s.url_rules), kv("Firewall rules", s.fw_rules)]),
     zsPanel("zpa", "ZPA · Private Access", s => { const h = s.connectors.filter(c => c.healthy).length; return [kv("App Connectors", (h === s.connectors.length ? "" : "▲ ") + h + " of " + s.connectors.length + " healthy", h === s.connectors.length ? "" : "warn"), kv("App segments", s.segments)]; }),
     zsPanel("zdx", "ZDX · Digital Experience", s => [kv("Average app score", s.score == null ? null : s.score + " / 100"), kv("Monitored apps", s.apps.length), kv("Ongoing alerts", s.alerts)]),
     zsPanel("ztw", "Zero Trust Branch", s => { const vms = s.groups.reduce((a, g) => a.concat(g.vms), []), h = vms.filter(v => v.healthy).length; return [kv("Connector groups", s.groups.length), kv("Connectors", (h === vms.length ? "" : "▲ ") + h + " of " + vms.length + " healthy", h === vms.length ? "" : "warn")]; }),
@@ -480,6 +485,14 @@ function zsPanels() {
 }
 function vZscaler() {
   const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
+  const zia = src("zia");
+  if (zia.ok && zia.gre && zia.gre.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZIA GRE tunnels")), $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Source IP", "Primary data center", "Primary VIP", "Secondary data center", "Secondary VIP", "Internal range", "Comment"].map(h => $("th", null, h)))),
+    $("tbody", null, zia.gre.map(t => $("tr", null, $("td", {class: "mono", style: "font-weight:500"}, t.source_ip || dash), $("td", null, t.primary_dc || dash), $("td", {class: "mono mute"}, t.primary_vip || dash), $("td", null, t.secondary_dc || dash), $("td", {class: "mono mute"}, t.secondary_vip || dash), $("td", {class: "mono mute"}, t.internal_range || dash), $("td", null, t.comment || dash))))))));
+  if (zia.ok && zia.vpn && zia.vpn.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZIA IPSec VPN credentials")), $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Identity", "Type", "Location", "State", "Comment"].map(h => $("th", null, h)))),
+    $("tbody", null, zia.vpn.map(v => $("tr", null, $("td", {style: "font-weight:500"}, v.identity || dash), $("td", null, v.type || dash), $("td", null, v.location || $("span", {class: "warn"}, "▲ Not assigned")), $("td", {class: v.disabled ? "mute" : ""}, v.disabled ? "Disabled" : "Enabled"), $("td", null, v.comment || dash))))))));
+  if (zia.ok && ((zia.gre && zia.gre.length) || (zia.vpn && zia.vpn.length))) out.push($("p", {class: "note"}, "These are the tunnels as configured in ZIA. The API used here does not report whether a tunnel is currently up."));
   if (zpa.ok && zpa.connectors.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZPA App Connectors")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Connector", "Group", "Status", "Data center", "Public IP", "Version"].map(h => $("th", null, h)))),
     $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", null, c.group || dash), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", null, c.broker || dash), $("td", {class: "mono mute"}, c.public_ip || dash), $("td", {class: "mono mute"}, c.version || dash))))))));

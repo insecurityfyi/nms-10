@@ -489,6 +489,26 @@ async def _zia(c, base, tok):
             out[key] = len(_as_list(await _zs_get(c, f"{base}/zia/api/v1/{path}", tok)))
         except httpx.HTTPError:
             pass  # the API role may not include this resource
+    out["gre"], out["vpn"] = None, None
+    try:  # GRE tunnels and the data centers they terminate in
+        out["gre"] = [{
+            "source_ip": t.get("sourceIp") or "", "comment": str(t.get("comment") or "")[:120],
+            "internal_range": t.get("internalIpRange") or "",
+            "primary_dc": _nm((t.get("primaryDestVip") or {}).get("datacenter")),
+            "primary_vip": (t.get("primaryDestVip") or {}).get("virtualIp") or "",
+            "secondary_dc": _nm((t.get("secondaryDestVip") or {}).get("datacenter")),
+            "secondary_vip": (t.get("secondaryDestVip") or {}).get("virtualIp") or "",
+        } for t in _as_list(await _zs_get(c, f"{base}/zia/api/v1/greTunnels", tok)) if isinstance(t, dict)]
+    except httpx.HTTPError:
+        pass
+    try:  # IPSec VPN credentials (identity only; the pre-shared key is never read into state)
+        out["vpn"] = [{
+            "identity": v.get("fqdn") or v.get("ipAddress") or str(v.get("id") or ""), "type": str(v.get("type") or ""),
+            "location": _nm(v.get("location")), "comment": str(v.get("comments") or "")[:120],
+            "disabled": bool(v.get("disabled")),
+        } for v in _as_list(await _zs_get(c, f"{base}/zia/api/v1/vpnCredentials", tok)) if isinstance(v, dict)]
+    except httpx.HTTPError:
+        pass
     return out
 
 
