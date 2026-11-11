@@ -66,7 +66,7 @@ def _num(s):
 async def snmp_device(dev, prev):
     res = {"id": dev["id"], "name": dev["name"], "host": dev["host"], "up": False, "sys_name": "",
            "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None,
-           "uplink_name": "", "uplink_auto": False, "neighbors": [], "error": ""}
+           "uplink_name": "", "uplink_auto": False, "interfaces": [], "neighbors": [], "error": ""}
     host = dev["host"]
     if not HOST_RE.match(host):
         res["error"] = "Invalid host"
@@ -160,6 +160,9 @@ async def _traffic(dev, host, prev, res):
         if not cands:
             return
         pick, auto = max(cands, key=lambda i: sum(cands[i])), True
+    top = sorted(rates, key=lambda i: sum(rates[i]), reverse=True)[:32]
+    res["interfaces"] = [{"idx": i, "name": names.get(i) or ("ifIndex " + i),
+                          "in_bps": round(rates[i][0]), "out_bps": round(rates[i][1])} for i in top]
     res["in_bps"], res["out_bps"] = round(rates[pick][0]), round(rates[pick][1])
     res["uplink_name"], res["uplink_auto"] = names.get(pick) or ("ifIndex " + pick), auto
 
@@ -371,7 +374,8 @@ async def collect_firewalla(cfg):
             boxes = [{"gid": b.get("gid") or "", "name": b.get("name") or b.get("model") or "", "model": b.get("model") or "",
                       "mode": b.get("mode") or "", "online": bool(b.get("online")), "version": b.get("version") or "",
                       "public_ip": b.get("publicIP") or "", "last_seen": b.get("lastSeen"),
-                      "devices": b.get("deviceCount"), "rules": b.get("ruleCount"), "alarms": b.get("alarmCount")}
+                      "devices": b.get("deviceCount"), "rules": b.get("ruleCount"), "alarms": b.get("alarmCount"),
+                      "down_bps": None, "up_bps": None}
                      for b in _as_list(r.json(), "results") if isinstance(b, dict)]
             out = {"configured": True, "ok": True, "error": "", "boxes": boxes,
                    "devices_total": None, "devices_online": None, "device_list": [],
@@ -387,6 +391,29 @@ async def collect_firewalla(cfg):
                     "gid": d.get("gid") or "",
                     "network": (d.get("network") or {}).get("name") or "" if isinstance(d.get("network"), dict) else ""}
                     for d in devs[:3000]]
+            except httpx.HTTPError:
+                pass
+            try:  # optional: recent internet traffic per box, estimated from the newest flows
+                r = await c.get(base + "/flows", headers=headers, params={"limit": 500})
+                r.raise_for_status()
+                now = time.time()
+                flows = [x for x in _as_list(r.json(), "results")
+                         if isinstance(x, dict) and isinstance(x.get("ts"), (int, float))]
+                if flows:
+                    # The API has no interface counters. Average the flows that ended in the last
+                    # five minutes, or over the span returned if a busy site fills the page sooner.
+                    window = min(300.0, max(30.0, now - min(x["ts"] for x in flows))) if len(flows) >= 500 else 300.0
+                    sums = {}
+                    for x in flows:
+                        if now - x["ts"] > window or x.get("block") or x.get("direction") == "local":
+                            continue
+                        t = sums.setdefault(x.get("gid"), [0, 0])
+                        t[0] += x.get("download") or 0
+                        t[1] += x.get("upload") or 0
+                    for b in boxes:
+                        d, u = sums.get(b["gid"], (0, 0))
+                        b["down_bps"], b["up_bps"] = round(d * 8 / window), round(u * 8 / window)
+                    out["traffic_window_s"] = round(window)
             except httpx.HTTPError:
                 pass
             try:  # optional: active alarms, newest first
