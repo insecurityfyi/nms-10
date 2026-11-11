@@ -73,6 +73,9 @@ label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-s
 .chips{display:flex;flex-wrap:wrap;gap:8px}.chip{background:var(--inset);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;min-width:130px}
 .leafbox{width:330px;max-width:80vw;background:#0E1622;border:1px solid #2F4A6B;border-radius:8px;padding:10px 12px;font-size:12px}
 .leafbox .chips{gap:6px;margin-top:8px}.leafbox .chip{min-width:0;flex:1 1 140px;padding:6px 8px}
+.linklab{font-size:11px;line-height:1.3;background:#0D1117;border:1px solid #2F4A6B;border-radius:10px;padding:3px 9px;color:var(--soft);margin-bottom:11px;position:relative;white-space:nowrap;text-align:center}
+.linklab::after{content:"";position:absolute;left:50%;top:100%;height:12px;border-left:1px dashed #4A7FB8}
+.linklab.down{color:var(--crit);border-color:#6B3A3A}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--mute);margin-top:6px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
@@ -332,7 +335,7 @@ function treeMap(key, title, roots, opts) {
     index[n.id] = n;
     const kids = (n.children || []).map(node);
     if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox"}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, 6))));
-    return $("li", null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
+    return $("li", null, n.link ? $("span", {class: "linklab" + (n.linkDown ? " down" : "")}, n.link) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
       $("span", {class: "nm"}, icon(n.kind), n.title),
       n.sub ? $("span", {class: "mute"}, n.sub) : null,
       n.status ? $("span", {class: n.status.ok === true ? "ok" : n.status.ok === false ? "crit" : "warn"}, (n.status.ok === true ? "● " : n.status.ok === false ? "✕ " : "▲ ") + n.status.text) : null,
@@ -410,13 +413,17 @@ function proxmoxTopology() {
 }
 function firewallaTopology() {
   const s = src("firewalla"), list = s.device_list || [];
-  const roots = s.boxes.map(b => { const mine = list.filter(d => d.gid === b.gid), nets = {};
+  const boxes = s.boxes.map(b => { const mine = list.filter(d => d.gid === b.gid), nets = {};
     mine.forEach(d => { (nets[d.network || "Unassigned"] = nets[d.network || "Unassigned"] || []).push(d); });
     return {id: "b:" + b.gid, kind: "gateway", title: b.name, sub: "Firewalla " + b.model + (b.mode ? " · " + b.mode : ""), status: {ok: b.online, text: b.online ? "Online" : "Offline"},
-      lines: [b.down_bps != null && "\u2193 " + bps(b.down_bps) + "  \u2191 " + bps(b.up_bps) + " (est.)", b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
+      link: !b.online ? "✕ Box offline" : b.down_bps != null ? "↓ " + bps(b.down_bps) + "   ↑ " + bps(b.up_bps) : "Link up · speed not reported", linkDown: !b.online,
+      lines: [b.public_ip && "WAN " + b.public_ip, b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
       children: Object.keys(nets).sort().map(n => { const ds = nets[n].slice().sort((x, y) => (y.online - x.online) || x.name.localeCompare(y.name));
         return {id: "b:" + b.gid + ":" + n, kind: "switch", title: n, sub: "Network", lines: [ds.filter(d => d.online).length + " of " + ds.length + " online"], leaves: ds.map(d => ({name: d.name, sub: d.ip, ok: d.online})), leafTitle: "Devices"}; })}; });
-  return treeMap("firewalla", "Topology map", roots, {hint: "Select a network to list all its devices"});
+  const live = s.boxes.filter(b => b.online && b.down_bps != null), up = s.boxes.filter(b => b.online).length;
+  const root = {id: "inet", kind: "cloud", title: "Internet", sub: "WAN", status: s.boxes.length ? {ok: up === s.boxes.length ? true : up ? null : false, text: up + " of " + s.boxes.length + " boxes online"} : null,
+    lines: [live.length ? "Total ↓ " + bps(live.reduce((t, b) => t + b.down_bps, 0)) + "  ↑ " + bps(live.reduce((t, b) => t + b.up_bps, 0)) : null], children: boxes};
+  return treeMap("firewalla", "Topology map", [root], {hint: "Link speeds are recent averages (estimated). Select a network to list its devices."});
 }
 function zscalerTopology() {
   const zia = src("zia"), zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard"), kids = [];
