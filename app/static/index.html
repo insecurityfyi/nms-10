@@ -71,6 +71,8 @@ label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-s
 .tnode .nm{font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;overflow-wrap:anywhere}
 .tnode svg{flex:none}
 .chips{display:flex;flex-wrap:wrap;gap:8px}.chip{background:var(--inset);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;min-width:130px}
+.leafbox{width:330px;max-width:80vw;background:#0E1622;border:1px solid #2F4A6B;border-radius:8px;padding:10px 12px;font-size:12px}
+.leafbox .chips{gap:6px;margin-top:8px}.leafbox .chip{min-width:0;flex:1 1 140px;padding:6px 8px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--mute);margin-top:6px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
@@ -227,7 +229,7 @@ function snmpTable(devs) {
       $("td", {class: "mono"}, d.in_bps == null ? (d.up ? $("span", {class: "mute"}, "measuring\u2026") : dash) : [bps(d.in_bps) + " / " + bps(d.out_bps), d.uplink_name && $("span", {class: "mute"}, " \u00b7 " + d.uplink_name + (d.uplink_auto ? " (busiest)" : ""))]),
       $("td", {class: "mono mute"}, dur(d.uptime_s)))))));
 }
-const vSnmp = () => $("section", {class: "card"}, snmpTable(src("snmp").devices || []));
+const vSnmp = () => src("snmp").configured ? [snmpTopology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Devices")), snmpTable(src("snmp").devices || []))] : $("section", {class: "card"}, snmpTable([]));
 function meter(label, p) {
   const hot = p != null && p >= 85;
   return $("div", null, $("div", {style: "display:flex;justify-content:space-between", class: hot ? "warn" : "mute"}, $("span", null, (hot ? "▲ " : "") + label), $("span", {class: "mono", style: hot ? "" : "color:var(--text)"}, p == null ? dash : p + "%")),
@@ -242,7 +244,7 @@ function nodeBars() {
 function vProxmox() {
   const bad = notReady("proxmox", "Proxmox"); if (bad) return $("section", {class: "card"}, bad);
   const s = src("proxmox");
-  return [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Nodes" + (s.cluster ? " · " + s.cluster : "")), s.quorate != null && $("span", {class: s.quorate ? "ok" : "crit"}, s.quorate ? "● Quorate" : "✕ No quorum")), nodeBars()),
+  return [proxmoxTopology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Nodes" + (s.cluster ? " · " + s.cluster : "")), s.quorate != null && $("span", {class: s.quorate ? "ok" : "crit"}, s.quorate ? "● Quorate" : "✕ No quorum")), nodeBars()),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Guests")), $("div", {class: "scroll"}, $("table", null,
       $("thead", null, $("tr", null, ["ID", "Name", "Type", "Node", "Status", "CPU", "Memory"].map(h => $("th", null, h)))),
       $("tbody", null, s.guests.map(g => $("tr", null, $("td", {class: "mono"}, g.vmid), $("td", {style: "font-weight:500"}, g.name), $("td", null, g.type), $("td", null, g.node),
@@ -264,6 +266,9 @@ const ICONS = {
   gateway: '<path d="M3 15h18v5H3z"/><path d="M7 17.5h.01M11 17.5h.01"/><path d="M12 15V9"/><path d="M8.5 6.5a5 5 0 0 1 7 0"/>',
   switch: '<rect x="2.5" y="8" width="19" height="8" rx="1.5"/><path d="M6 12h.01M9.5 12h.01M13 12h.01M16.5 12h.01"/>',
   ap: '<path d="M4.5 10a11 11 0 0 1 15 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><path d="M12 17.5h.01"/>',
+  server: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  cluster: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>',
+  cloud: '<path d="M7 18a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17.2 9.1 4.5 4.5 0 0 1 17 18z"/>',
   other: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M9 20h6"/>'};
 function icon(kind) {
   const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -271,42 +276,112 @@ function icon(kind) {
   el.innerHTML = ICONS[kind] || ICONS.other;  /* static markup from ICONS only */
   return el;
 }
-function topology() {
+const treeSel = {};
+function chipEl(c) {
+  return $("div", {class: "chip"}, $("div", {style: "font-weight:500;overflow-wrap:anywhere"}, c.ok != null && $("span", {class: c.ok ? "ok" : "crit"}, c.ok ? "● " : "✕ "), c.name || dash), c.sub ? $("div", {class: "mute", style: "overflow-wrap:anywhere"}, c.sub) : null);
+}
+function chipList(list, max) {
+  return $("div", {class: "chips"}, list.slice(0, max).map(chipEl), list.length > max && $("div", {class: "chip mute", style: "display:flex;align-items:center"}, "… " + (list.length - max) + " more"));
+}
+/* Generic map. Node: {id, kind, title, sub, status:{ok,text}, lines:[..], children:[..], leaves:[{name,sub,ok}], leafTitle} */
+function treeMap(key, title, roots, opts) {
+  opts = opts || {};
+  const cur = treeSel[key] || "", index = {};
+  const node = n => {
+    index[n.id] = n;
+    const kids = (n.children || []).map(node);
+    if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox"}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, 6))));
+    return $("li", null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
+      $("span", {class: "nm"}, icon(n.kind), n.title),
+      n.sub ? $("span", {class: "mute"}, n.sub) : null,
+      n.status ? $("span", {class: n.status.ok === true ? "ok" : n.status.ok === false ? "crit" : "warn"}, (n.status.ok === true ? "● " : n.status.ok === false ? "✕ " : "▲ ") + n.status.text) : null,
+      (n.lines || []).filter(Boolean).map(t => $("span", {class: "mute"}, t))),
+      kids.length ? $("ul", null, kids) : null);
+  };
+  const tree = $("div", {class: "tree", id: "topo", tabindex: "0", role: "group", "aria-label": title}, $("ul", null, roots.map(node)));
+  const sel = index[cur];
+  let panel = null;
+  if (opts.panel) panel = opts.panel(sel);
+  else if (sel && sel.leaves && sel.leaves.length) panel = [$("div", {class: "mute", style: "margin-bottom:10px"}, (sel.leafTitle || "Connected") + " on " + sel.title + " (" + sel.leaves.length + ")"), chipList(sel.leaves, 500)];
+  return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, title), $("span", {class: "mute"}, opts.hint || "Select an item to list everything under it")),
+    opts.note ? $("div", {class: "warn", style: "margin-bottom:8px"}, "▲ " + opts.note) : null,
+    roots.length ? tree : $("div", {class: "empty"}, "Nothing to show yet."),
+    panel ? $("div", {style: "border-top:1px solid var(--line);margin-top:14px;padding-top:14px"}, panel) : null);
+}
+function unifiTopology() {
   const s = src("unifi"), kinds = {ap: "Access point", switch: "Switch", gateway: "Gateway", other: "Device"}, rank = {gateway: 0, switch: 1, ap: 2, other: 3};
   const byId = {}; s.devices.forEach(d => { if (d.id) byId[d.id] = d; });
   const kids = {}, roots = [];
   s.devices.forEach(d => { if (d.uplink && byId[d.uplink] && d.uplink !== d.id) (kids[d.uplink] = kids[d.uplink] || []).push(d); else roots.push(d); });
   const order = list => list.slice().sort((a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name));
-  const linked = s.devices.some(d => d.uplink && byId[d.uplink]);
-  const seen = new Set();
-  const node = d => {
-    if (seen.has(d.id || d.name)) return null; seen.add(d.id || d.name);
-    const on = d.state === "ONLINE", ch = order(kids[d.id] || []);
-    return $("li", null, $("button", {type: "button", class: "tnode" + (uniSel && uniSel === d.id ? " sel" : ""), "aria-pressed": uniSel === d.id ? "true" : "false", onclick: () => { uniSel = uniSel === d.id ? "" : d.id; render(); }},
-      $("span", {class: "nm"}, icon(d.kind), d.name),
-      $("span", {class: "mute"}, kinds[d.kind] + (d.model ? " \u00b7 " + d.model : "")),
-      $("span", {class: on ? "ok" : "crit"}, (on ? "\u25CF " : "\u2715 ") + (on ? "Online" : (d.state || "Unknown").charAt(0) + (d.state || "Unknown").slice(1).toLowerCase())),
-      d.uptime_s != null && $("span", {class: "mute"}, "Uptime " + dur(d.uptime_s)),
-      $("span", {class: "mute"}, d.clients + " client" + (d.clients === 1 ? "" : "s"))),
-      ch.length ? $("ul", null, ch.map(node)) : null);
+  const linked = s.devices.some(d => d.uplink && byId[d.uplink]), seen = new Set();
+  const build = d => {
+    const k = d.id || d.name; if (seen.has(k)) return null; seen.add(k);
+    const on = d.state === "ONLINE", st = d.state || "Unknown";
+    return {id: k, kind: d.kind, title: d.name, sub: kinds[d.kind] + (d.model ? " · " + d.model : ""), status: {ok: on, text: on ? "Online" : st.charAt(0) + st.slice(1).toLowerCase()},
+      lines: [d.uptime_s != null && "Uptime " + dur(d.uptime_s), d.clients + " client" + (d.clients === 1 ? "" : "s")], children: order(kids[d.id] || []).map(build).filter(Boolean)};
   };
-  const tree = $("div", {class: "tree", id: "topo", tabindex: "0", role: "group", "aria-label": "UniFi topology map"}, $("ul", null, order(roots).map(node)));
-  const sel = byId[uniSel], list = s.client_list || [], shown = sel ? list.filter(c => c.uplink === sel.id) : list;
-  const group = (title, type) => { const g = shown.filter(c => c.type === type), max = 12; return $("div", {style: "flex:1 1 320px;min-width:0"},
-    $("div", {style: "font-weight:600;margin-bottom:8px"}, title + " (" + g.length + ")"),
-    g.length ? $("div", {class: "chips"}, g.slice(0, max).map(c => $("div", {class: "chip"}, $("div", {style: "font-weight:500;overflow-wrap:anywhere"}, c.name || dash), $("div", {class: "mono mute"}, c.ip || dash))), g.length > max && $("div", {class: "chip mute", style: "display:flex;align-items:center"}, "\u2026 " + (g.length - max) + " more")) : $("div", {class: "mute"}, "None")); };
-  return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Topology map"), $("span", {class: "mute"}, "Select a device to see its clients")),
-    !linked && s.devices.length > 1 && $("div", {class: "warn", style: "margin-bottom:8px"}, "\u25B2 This controller did not report uplinks, so devices are shown without links."),
-    tree,
-    $("div", {class: "legend"}, $("span", null, "- - -  Uplink reported by UniFi"), $("span", {class: "ok"}, "\u25CF Online"), $("span", {class: "crit"}, "\u2715 Offline")),
-    $("div", {style: "border-top:1px solid var(--line);margin-top:14px;padding-top:14px"},
-      $("div", {class: "mute", style: "margin-bottom:10px"}, sel ? "Clients on " + sel.name : "All clients"),
-      $("div", {style: "display:flex;flex-wrap:wrap;gap:20px"}, group("Wired clients", "wired"), group("Wireless clients", "wireless"))));
+  const list = s.client_list || [];
+  return treeMap("unifi", "Topology map", order(roots).map(build).filter(Boolean), {
+    hint: "Select a device to see its clients",
+    note: !linked && s.devices.length > 1 ? "This controller did not report uplinks, so devices are shown without links." : "",
+    panel: sel => { const shown = sel ? list.filter(c => c.uplink === sel.id) : list;
+      const group = (t, type) => { const g = shown.filter(c => c.type === type); return $("div", {style: "flex:1 1 320px;min-width:0"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, t + " (" + g.length + ")"), g.length ? chipList(g.map(c => ({name: c.name, sub: c.ip})), 12) : $("div", {class: "mute"}, "None")); };
+      return [$("div", {class: "mute", style: "margin-bottom:10px"}, sel ? "Clients on " + sel.title : "All clients"), $("div", {style: "display:flex;flex-wrap:wrap;gap:20px"}, group("Wired clients", "wired"), group("Wireless clients", "wireless"))]; }});
+}
+function snmpTopology() {
+  const devs = src("snmp").devices || [], norm = x => String(x || "").toLowerCase().split(".")[0];
+  const byName = {}; devs.forEach(d => { [d.sys_name, d.name].forEach(n => { if (n && !byName[norm(n)]) byName[norm(n)] = d; }); });
+  const adj = {}, ext = {}, any = devs.some(d => (d.neighbors || []).length);
+  devs.forEach(d => { adj[d.id] = adj[d.id] || {}; ext[d.id] = {};
+    (d.neighbors || []).forEach(n => { const m = byName[norm(n.name)];
+      if (m && m.id !== d.id) { adj[d.id][m.id] = adj[d.id][m.id] || (n.local_port + " ↔ " + n.port); adj[m.id] = adj[m.id] || {}; adj[m.id][d.id] = adj[m.id][d.id] || (n.port + " ↔ " + n.local_port); }
+      else if (!m && n.name) ext[d.id][n.name] = {name: n.name, sub: (n.local_port || "?") + " ↔ " + (n.port || "?")}; }); });
+  const byId = {}; devs.forEach(d => { byId[d.id] = d; });
+  const seen = new Set(), roots = [];
+  const build = (d, link) => { seen.add(d.id);
+    const kids = Object.keys(adj[d.id] || {}).filter(id => !seen.has(id) && byId[id]); kids.forEach(id => seen.add(id));
+    return {id: d.id, kind: "switch", title: d.name, sub: d.host, status: d.up ? {ok: true, text: "Up"} : {ok: false, text: d.error || "No response"},
+      lines: [link && "Link " + link, d.cpu != null && "CPU " + d.cpu + "%", d.uptime_s != null && "Uptime " + dur(d.uptime_s)],
+      children: kids.map(id => build(byId[id], adj[id][d.id])), leaves: Object.values(ext[d.id] || {}), leafTitle: "Other LLDP neighbours"}; };
+  devs.slice().sort((a, b) => Object.keys(adj[b.id] || {}).length - Object.keys(adj[a.id] || {}).length || a.name.localeCompare(b.name)).forEach(d => { if (!seen.has(d.id)) roots.push(build(d, "")); });
+  return treeMap("snmp", "Topology map", roots, {note: devs.length && !any ? "No device reported LLDP neighbours, so devices are shown without links." : ""});
+}
+function proxmoxTopology() {
+  const s = src("proxmox"), running = s.guests.filter(g => g.status === "running").length;
+  const nodes = s.nodes.map(n => { const g = s.guests.filter(x => x.node === n.name);
+    return {id: "n:" + n.name, kind: "server", title: n.name, sub: "Node", status: {ok: n.online, text: n.online ? "Online" : "Offline"},
+      lines: [n.cpu != null && "CPU " + Math.round(n.cpu * 100) + "%", pct(n.mem, n.maxmem) != null && "RAM " + pct(n.mem, n.maxmem) + "%", n.uptime != null && "Uptime " + dur(n.uptime)],
+      leaves: g.map(x => ({name: x.name, sub: x.type + " " + x.vmid + " · " + x.status, ok: x.status === "running" ? true : null})), leafTitle: "Guests"}; });
+  return treeMap("proxmox", "Topology map", [{id: "cluster", kind: "cluster", title: s.cluster || "Proxmox", sub: s.cluster ? "Cluster" : "Standalone", status: s.quorate == null ? null : {ok: s.quorate, text: s.quorate ? "Quorate" : "No quorum"},
+    lines: [s.nodes.length + " node" + (s.nodes.length === 1 ? "" : "s"), running + " of " + s.guests.length + " guests running"], children: nodes}], {hint: "Select a node to list all its guests"});
+}
+function firewallaTopology() {
+  const s = src("firewalla"), list = s.device_list || [];
+  const roots = s.boxes.map(b => { const mine = list.filter(d => d.gid === b.gid), nets = {};
+    mine.forEach(d => { (nets[d.network || "Unassigned"] = nets[d.network || "Unassigned"] || []).push(d); });
+    return {id: "b:" + b.gid, kind: "gateway", title: b.name, sub: "Firewalla " + b.model + (b.mode ? " · " + b.mode : ""), status: {ok: b.online, text: b.online ? "Online" : "Offline"},
+      lines: [b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
+      children: Object.keys(nets).sort().map(n => { const ds = nets[n].slice().sort((x, y) => (y.online - x.online) || x.name.localeCompare(y.name));
+        return {id: "b:" + b.gid + ":" + n, kind: "switch", title: n, sub: "Network", lines: [ds.filter(d => d.online).length + " of " + ds.length + " online"], leaves: ds.map(d => ({name: d.name, sub: d.ip, ok: d.online})), leafTitle: "Devices"}; })}; });
+  return treeMap("firewalla", "Topology map", roots, {hint: "Select a network to list all its devices"});
+}
+function zscalerTopology() {
+  const zia = src("zia"), zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard"), kids = [];
+  const fail = (id, t, s) => ({id: id, kind: "cloud", title: t, status: {ok: null, text: "Poll failed"}});
+  if (zia.configured) kids.push(zia.ok ? {id: "zia", kind: "cloud", title: "ZIA", sub: "Internet Access", status: {ok: zia.status === "ACTIVE" ? true : null, text: zia.status === "ACTIVE" ? "Config active" : (zia.status || "Unknown").toLowerCase()}, lines: [zia.locations != null && zia.locations + " locations", zia.url_rules != null && zia.url_rules + " URL rules", zia.fw_rules != null && zia.fw_rules + " firewall rules"]} : fail("zia", "ZIA"));
+  if (zpa.configured) { if (zpa.ok) { const groups = {}; zpa.connectors.forEach(c => { (groups[c.group || "App Connectors"] = groups[c.group || "App Connectors"] || []).push(c); });
+      kids.push({id: "zpa", kind: "cloud", title: "ZPA", sub: "Private Access", lines: [zpa.segments != null && zpa.segments + " app segments", zpa.connectors.length + " connectors"],
+        children: Object.keys(groups).sort().map(g => ({id: "zpa:" + g, kind: "switch", title: g, sub: "Connector group", lines: [groups[g].filter(c => c.healthy).length + " of " + groups[g].length + " healthy"], leafTitle: "Connectors", leaves: groups[g].map(c => ({name: c.name, sub: c.enabled ? c.status : "Disabled", ok: c.enabled ? c.healthy : null}))}))}); } else kids.push(fail("zpa", "ZPA")); }
+  if (zdx.configured) kids.push(zdx.ok ? {id: "zdx", kind: "cloud", title: "ZDX", sub: "Digital Experience", lines: [zdx.score != null && "Average score " + zdx.score, zdx.alerts != null && zdx.alerts + " ongoing alerts"], leafTitle: "Applications", leaves: zdx.apps.map(a => ({name: a.name, sub: a.score == null ? "No score" : "Score " + a.score, ok: a.score == null ? null : a.score >= 66}))} : fail("zdx", "ZDX"));
+  if (ai.configured) kids.push(ai.ok ? {id: "ai", kind: "cloud", title: "AI Security", sub: "AI Guard", lines: [ai.providers != null && ai.providers + " LLM providers", ai.applications != null && ai.applications + " LLM applications"], leafTitle: "Detection policies", leaves: ai.policy_names.map(n => ({name: n}))} : fail("ai", "AI Security"));
+  if (!kids.length) return null;
+  return treeMap("zscaler", "Topology map", [{id: "zs", kind: "cloud", title: "Zscaler", sub: "Zero Trust Exchange", status: {ok: true, text: "API connected"}, children: kids}]);
 }
 function vUnifi() {
   const bad = notReady("unifi", "UniFi"); if (bad) return $("section", {class: "card"}, bad);
   const s = src("unifi"), kinds = {ap: "Access point", switch: "Switch", gateway: "Gateway", other: "Other"};
-  return [topology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")), unifiSummary()),
+  return [unifiTopology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")), unifiSummary()),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Devices")), $("div", {class: "scroll"}, $("table", null,
       $("thead", null, $("tr", null, ["Device", "Type", "Model", "Address", "Site", "Status"].map(h => $("th", null, h)))),
       $("tbody", null, s.devices.map(d => $("tr", null, $("td", {style: "font-weight:500"}, d.name), $("td", null, kinds[d.kind]), $("td", null, d.model), $("td", {class: "mono mute"}, d.ip || dash), $("td", null, d.site),
@@ -315,7 +390,7 @@ function vUnifi() {
 function vFirewalla() {
   const bad = notReady("firewalla", "Firewalla"); if (bad) return $("section", {class: "card"}, bad);
   const s = src("firewalla"), sum = k => s.boxes.reduce((n, b) => n + (b[k] || 0), 0);
-  return [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")),
+  return [firewallaTopology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")),
       kv("Boxes online", s.boxes.filter(b => b.online).length + " of " + s.boxes.length),
       kv("Devices online", s.devices_total == null ? null : s.devices_online + " of " + s.devices_total),
       kv("Active alarms", s.alarm_count, s.alarm_count ? "warn" : ""), kv("Rules", sum("rules"))),
@@ -341,7 +416,7 @@ function zsPanels() {
     zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
 }
 function vZscaler() {
-  const out = [$("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
+  const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
   if (zpa.ok && zpa.connectors.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZPA App Connectors")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Connector", "Status", "Version"].map(h => $("th", null, h)))),
     $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", {class: "mono mute"}, c.version || dash))))))));

@@ -66,7 +66,7 @@ def _num(s):
 async def snmp_device(dev, prev):
     res = {"id": dev["id"], "name": dev["name"], "host": dev["host"], "up": False, "sys_name": "",
            "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None,
-           "uplink_name": "", "uplink_auto": False, "error": ""}
+           "uplink_name": "", "uplink_auto": False, "neighbors": [], "error": ""}
     host = dev["host"]
     if not HOST_RE.match(host):
         res["error"] = "Invalid host"
@@ -89,7 +89,26 @@ async def snmp_device(dev, prev):
         res["cpu"] = round(sum(loads) / len(loads))
 
     await _traffic(dev, host, prev, res)
+    res["neighbors"] = await _lldp(dev, host)
     return res
+
+
+async def _lldp(dev, host):
+    """LLDP neighbours: what is plugged into which local port."""
+    names = await _walk(dev, host, "1.0.8802.1.1.2.1.4.1.1.9")      # lldpRemSysName
+    if not names:
+        return []
+    rports = await _walk(dev, host, "1.0.8802.1.1.2.1.4.1.1.8")     # lldpRemPortDesc
+    rids = await _walk(dev, host, "1.0.8802.1.1.2.1.4.1.1.7")       # lldpRemPortId
+    lports = await _walk(dev, host, "1.0.8802.1.1.2.1.3.7.1.4")     # lldpLocPortDesc
+    lids = await _walk(dev, host, "1.0.8802.1.1.2.1.3.7.1.3")       # lldpLocPortId
+    out = []
+    for idx, name in names.items():
+        parts = idx.split(".")
+        local = parts[1] if len(parts) >= 3 else ""
+        out.append({"name": name[:80], "port": (rports.get(idx) or rids.get(idx) or "")[:60],
+                    "local_port": (lports.get(local) or lids.get(local) or (f"port {local}" if local else ""))[:60]})
+    return out[:128]
 
 
 async def _walk(dev, host, oid):
@@ -101,7 +120,7 @@ async def _walk(dev, host, oid):
     for line in out.splitlines():
         parts = line.split(None, 1)
         if len(parts) == 2 and parts[0].startswith("." + oid + "."):
-            rows[parts[0].rsplit(".", 1)[1]] = parts[1].strip().strip('"')
+            rows[parts[0][len(oid) + 2:]] = parts[1].strip().strip('"')
     return rows
 
 
@@ -355,13 +374,19 @@ async def collect_firewalla(cfg):
                       "devices": b.get("deviceCount"), "rules": b.get("ruleCount"), "alarms": b.get("alarmCount")}
                      for b in _as_list(r.json(), "results") if isinstance(b, dict)]
             out = {"configured": True, "ok": True, "error": "", "boxes": boxes,
-                   "devices_total": None, "devices_online": None, "alarm_count": None, "alarm_list": []}
+                   "devices_total": None, "devices_online": None, "device_list": [],
+                   "alarm_count": None, "alarm_list": []}
             try:  # optional: device counts
                 r = await c.get(base + "/devices", headers=headers)
                 r.raise_for_status()
                 devs = [d for d in _as_list(r.json(), "results") if isinstance(d, dict)]
                 out["devices_total"] = len(devs)
                 out["devices_online"] = sum(1 for d in devs if d.get("online"))
+                out["device_list"] = [{
+                    "name": d.get("name") or d.get("ip") or "", "ip": d.get("ip") or "", "online": bool(d.get("online")),
+                    "gid": d.get("gid") or "",
+                    "network": (d.get("network") or {}).get("name") or "" if isinstance(d.get("network"), dict) else ""}
+                    for d in devs[:3000]]
             except httpx.HTTPError:
                 pass
             try:  # optional: active alarms, newest first
@@ -446,7 +471,8 @@ async def _zpa(c, base, tok, customer):
             "name": x.get("name") or "", "enabled": bool(x.get("enabled", True)),
             "status": st.replace("ZPN_STATUS_", "").replace("_", " ").title() or "Unknown",
             "healthy": bool(x.get("enabled", True)) and st.endswith("AUTHENTICATED"),
-            "version": x.get("currentVersion") or ""})
+            "version": x.get("currentVersion") or "",
+            "group": x.get("appConnectorGroupName") or ""})
     try:
         body = await _zs_get(c, f"{root}/application", tok, {"page": 1, "pagesize": 500})
         total = body.get("totalCount") if isinstance(body, dict) else None

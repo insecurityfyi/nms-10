@@ -2,7 +2,7 @@
 
 Read-only monitoring dashboard for a small network:
 
-- **SNMP** devices (v2c and v3): subnet discovery, reachability, uptime, CPU load, uplink traffic
+- **SNMP** devices (v2c and v3): subnet discovery, reachability, uptime, CPU load, traffic, LLDP neighbours
 - **Ubiquiti UniFi** via the UniFi Network Integration API (API key), with a topology map
 - **Proxmox VE** via API token: nodes, guests, storage
 - **Firewalla** via the MSP API: boxes, device counts, active alarms
@@ -38,6 +38,7 @@ password. Re-run the same command to update.
 
 - The app serves plain HTTP on port 8080. Keep it on the internal network, or put a
   TLS reverse proxy in front of it.
+- Every source page opens with a topology map (SNMP links come from LLDP).
 - Monitoring only: nothing in this version changes configuration on any device.
 - Run locally: `pip install -r requirements.txt && NSM_DATA=./data uvicorn app.main:app --port 8080`
   (SNMP polling needs the net-snmp tools: `apt install snmp`).
