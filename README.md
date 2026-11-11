@@ -18,7 +18,7 @@ From Windows PowerShell, in this folder:
 
 Or on the server itself:
 
-    git clone <this repo> nsm-10 && cd nsm-10 && sudo bash install.sh
+    git clone https://github.com/insecurityfyi/nms-10 nsm-10 && cd nsm-10 && sudo bash install.sh
 
 Then open `http://192.168.7.10:8080`. The first visit asks you to create the admin
 password. Re-run the same command to update.

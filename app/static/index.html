@@ -198,13 +198,13 @@ const vAlerts = () => $("section", {class: "card"}, alertList(state.alerts));
 function snmpTable(devs) {
   if (!src("snmp").configured) return notReady("snmp", "SNMP");
   return $("div", {class: "scroll"}, $("table", null,
-    $("thead", null, $("tr", null, ["Device", "Address", "Status", "CPU", "Uplink in / out", "Uptime"].map(h => $("th", null, h)))),
+    $("thead", null, $("tr", null, ["Device", "Address", "Status", "CPU", "Traffic in / out", "Uptime"].map(h => $("th", null, h)))),
     $("tbody", null, devs.map(d => $("tr", null,
       $("td", {style: "font-weight:500"}, d.name, d.sys_name && d.sys_name !== d.name ? $("span", {class: "mute"}, " (" + d.sys_name + ")") : null),
       $("td", {class: "mono mute"}, d.host),
       $("td", {class: d.up ? (d.cpu >= 90 ? "warn" : "ok") : "crit"}, d.up ? (d.cpu >= 90 ? "▲ High CPU" : "● Up") : "✕ " + (d.error || "No response")),
       $("td", {class: "mono"}, d.cpu == null ? dash : d.cpu + "%"),
-      $("td", {class: "mono"}, d.in_bps == null ? dash : bps(d.in_bps) + " / " + bps(d.out_bps)),
+      $("td", {class: "mono"}, d.in_bps == null ? (d.up ? $("span", {class: "mute"}, "measuring\u2026") : dash) : [bps(d.in_bps) + " / " + bps(d.out_bps), d.uplink_name && $("span", {class: "mute"}, " \u00b7 " + d.uplink_name + (d.uplink_auto ? " (busiest)" : ""))]),
       $("td", {class: "mono mute"}, dur(d.uptime_s)))))));
 }
 const vSnmp = () => $("section", {class: "card"}, snmpTable(src("snmp").devices || []));
@@ -328,18 +328,18 @@ function renderSettings() {
     $("div", {class: "form"}, field(d, "name", "Display name"), field(d, "host", "IP address or hostname", {placeholder: "192.168.7.2"}), field(d, "version", "SNMP version", {options: ["2c", "3"], rerender: true}),
       d.version === "3" ? [field(d, "v3_user", "v3 username"), field(d, "v3_auth_proto", "Auth protocol", {options: ["SHA", "SHA-256", "SHA-512", "MD5"]}), field(d, "v3_auth_pass", "Auth passphrase", pw), field(d, "v3_priv_proto", "Privacy protocol", {options: ["AES", "AES-256", "DES"]}), field(d, "v3_priv_pass", "Privacy passphrase", pw)]
         : field(d, "community", "Community string", pw),
-      field(d, "uplink_ifindex", "Uplink ifIndex (optional)", {placeholder: "e.g. 1"}))));
+      field(d, "uplink_ifindex", "Uplink ifIndex (blank = busiest interface)", {placeholder: "auto"}))));
   const msg = $("span", {role: "status", class: saveMsg.startsWith("Saved") ? "ok" : "crit"}, saveMsg);
   box.replaceChildren(
     $("section", {class: "card"}, $("h2", null, "General"), $("div", {class: "form"}, field(S, "poll_interval", "Poll interval in seconds (15–3600)", {type: "number"}))),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "SNMP devices"), $("button", {type: "button", onclick: () => { S.snmp.devices.push({id: "", name: "", host: "", version: "2c", community: "", v3_user: "", v3_auth_proto: "SHA", v3_auth_pass: "", v3_priv_proto: "AES", v3_priv_pass: "", uplink_ifindex: ""}); renderSettings(); }}, "Add device")),
-      $("p", {class: "note"}, "Discover devices on a range, or add one by hand. Each device is polled for name, uptime and CPU load. Set an uplink ifIndex to also show traffic on that interface."), discoveryEl(), devs.length ? devs : $("div", {class: "empty"}, "No devices yet.")),
+      $("p", {class: "note"}, "Discover devices on a range, or add one by hand. Each device is polled for name, uptime, CPU load and interface traffic. Traffic shows the busiest interface unless you set an uplink ifIndex."), discoveryEl(), devs.length ? devs : $("div", {class: "empty"}, "No devices yet.")),
     $("section", {class: "card"}, $("h2", null, "Ubiquiti UniFi"), $("p", {class: "note"}, "Uses the UniFi Network Integration API. Create the key in UniFi Network under Settings, Control Plane, Integrations."),
       $("div", {class: "form"}, field(S.unifi, "enabled", "Enabled", {type: "checkbox"}), field(S.unifi, "url", "Console URL", {placeholder: "https://192.168.7.1"}), field(S.unifi, "api_key", "API key", pw), field(S.unifi, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
     $("section", {class: "card"}, $("h2", null, "Proxmox VE"), $("p", {class: "note"}, "Uses an API token. A token with the PVEAuditor role on / is enough for monitoring."),
       $("div", {class: "form"}, field(S.proxmox, "enabled", "Enabled", {type: "checkbox"}), field(S.proxmox, "url", "API URL", {placeholder: "https://192.168.7.11:8006"}), field(S.proxmox, "token_id", "Token ID", {placeholder: "monitor@pve!nsm10"}), field(S.proxmox, "token_secret", "Token secret", pw), field(S.proxmox, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
-    $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. Leave cloud blank for the production cloud."),
-      $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (optional)", {placeholder: "beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
+    $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
+      $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
       $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";

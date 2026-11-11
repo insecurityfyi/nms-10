@@ -40,7 +40,7 @@ async def _run(args, timeout=10):
     return p.returncode, out.decode(errors="replace"), err.decode(errors="replace")
 
 
-def _snmp_args(dev, timeout="2", retries="1"):
+def _snmp_args(dev, timeout="2", retries="1", fmt="-Oqvt"):
     if dev.get("version") == "3":
         a = ["-v3", "-u", dev.get("v3_user") or "nsm"]
         ap, pp = dev.get("v3_auth_pass"), dev.get("v3_priv_pass")
@@ -53,7 +53,7 @@ def _snmp_args(dev, timeout="2", retries="1"):
             a += ["-x", proto if proto in PRIV_PROTOS else "AES", "-X", pp]
     else:
         a = ["-v2c", "-c", dev.get("community") or "public"]
-    return a + ["-t", timeout, "-r", retries, "-Oqvt"]
+    return a + ["-t", timeout, "-r", retries, fmt]
 
 
 def _num(s):
@@ -65,7 +65,8 @@ def _num(s):
 
 async def snmp_device(dev, prev):
     res = {"id": dev["id"], "name": dev["name"], "host": dev["host"], "up": False, "sys_name": "",
-           "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None, "error": ""}
+           "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None,
+           "uplink_name": "", "uplink_auto": False, "error": ""}
     host = dev["host"]
     if not HOST_RE.match(host):
         res["error"] = "Invalid host"
@@ -87,20 +88,61 @@ async def snmp_device(dev, prev):
     if loads:
         res["cpu"] = round(sum(loads) / len(loads))
 
-    idx = str(dev.get("uplink_ifindex") or "").strip()
-    if idx.isdigit():
-        rc, out, _ = await _run(["snmpget", *auth, host,
-                                 f"1.3.6.1.2.1.31.1.1.1.6.{idx}", f"1.3.6.1.2.1.31.1.1.1.10.{idx}"])
-        vals = [_num(x) for x in out.splitlines()]
-        if rc == 0 and len(vals) == 2 and None not in vals:
-            now = time.time()
-            p = prev.get(dev["id"])
-            if p and now > p[0] and vals[0] >= p[1] and vals[1] >= p[2]:
-                dt = now - p[0]
-                res["in_bps"] = round((vals[0] - p[1]) * 8 / dt)
-                res["out_bps"] = round((vals[1] - p[2]) * 8 / dt)
-            prev[dev["id"]] = (now, vals[0], vals[1])
+    await _traffic(dev, host, prev, res)
     return res
+
+
+async def _walk(dev, host, oid):
+    """Walk one table column; return {row index: value}."""
+    rc, out, _ = await _run(["snmpwalk", *_snmp_args(dev, fmt="-Oqn"), host, oid], timeout=25)
+    rows = {}
+    if rc != 0:
+        return rows
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].startswith("." + oid + "."):
+            rows[parts[0].rsplit(".", 1)[1]] = parts[1].strip().strip('"')
+    return rows
+
+
+async def _traffic(dev, host, prev, res):
+    """Per-interface rates from octet counters. Uses the configured ifIndex,
+    otherwise the busiest non-loopback interface."""
+    ins = await _walk(dev, host, "1.3.6.1.2.1.31.1.1.1.6")
+    outs = await _walk(dev, host, "1.3.6.1.2.1.31.1.1.1.10") if ins else {}
+    if not ins or not outs:  # no 64-bit counters: fall back to the 32-bit ones
+        ins = await _walk(dev, host, "1.3.6.1.2.1.2.2.1.10")
+        outs = await _walk(dev, host, "1.3.6.1.2.1.2.2.1.16") if ins else {}
+    counters = {}
+    for i, v in ins.items():
+        a, b = _num(v), _num(outs.get(i, ""))
+        if a is not None and b is not None:
+            counters[i] = (a, b)
+    if not counters:
+        return
+    now = time.time()
+    p = prev.get(dev["id"]) or {}
+    names = p.get("names") or {}
+    if not names:
+        names = await _walk(dev, host, "1.3.6.1.2.1.31.1.1.1.1") or await _walk(dev, host, "1.3.6.1.2.1.2.2.1.2")
+    prev[dev["id"]] = {"t": now, "counters": counters, "names": names}
+    old, dt = p.get("counters") or {}, now - p.get("t", now)
+    if dt <= 0:
+        return
+    rates = {}
+    for i, (a, b) in counters.items():
+        if i in old and a >= old[i][0] and b >= old[i][1]:
+            rates[i] = ((a - old[i][0]) * 8 / dt, (b - old[i][1]) * 8 / dt)
+    want = str(dev.get("uplink_ifindex") or "").strip()
+    if want in rates:
+        pick, auto = want, False
+    else:
+        cands = {i: r for i, r in rates.items() if not names.get(i, "").lower().startswith(("lo", "null"))} or rates
+        if not cands:
+            return
+        pick, auto = max(cands, key=lambda i: sum(cands[i])), True
+    res["in_bps"], res["out_bps"] = round(rates[pick][0]), round(rates[pick][1])
+    res["uplink_name"], res["uplink_auto"] = names.get(pick) or ("ifIndex " + pick), auto
 
 
 async def collect_snmp(cfg, prev):
@@ -369,6 +411,13 @@ async def collect_zscaler(cfg):
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         try:
             tok = await _zs_token(c, z)
+        except httpx.ConnectError as e:
+            host = f"{z['vanity']}.zslogin{z['cloud']}.net"
+            msg = (f"Sign-in failed: cannot reach {host} ({str(e)[:80]}). Check the vanity domain: it is the part "
+                   "before .zslogin.net in your ZIdentity admin URL. Leave Cloud blank unless you are on beta.")
+        except httpx.HTTPStatusError as e:
+            hint = " Check the client ID and secret." if e.response.status_code in (400, 401) else ""
+            msg = "Sign-in failed: " + _err(e) + "." + hint
         except Exception as e:  # noqa: BLE001
             msg = "Sign-in failed: " + _err(e)
             return {p: ({"configured": True, "ok": False, "error": msg} if z[p] else {"configured": False})

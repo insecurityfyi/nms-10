@@ -105,7 +105,27 @@ def normalize(cfg):
         dev["version"] = "3" if dev["version"] == "3" else "2c"
         devices.append(dev)
     out["snmp"]["devices"] = devices[:500]
+    z = out["zscaler"]
+    z["vanity"], cloud_hint = _clean_vanity(z["vanity"])
+    cloud = (z["cloud"] or cloud_hint).lower().strip(". ")
+    # ZIA cloud names (zscaler, zscalertwo, zscloud...) and "production" all mean the default OneAPI cloud.
+    z["cloud"] = "" if cloud in PRODUCTION_CLOUDS else cloud
     return out
+
+
+PRODUCTION_CLOUDS = {"", "production", "prod", "default", "zscaler", "zscalerone", "zscalertwo",
+                     "zscalerthree", "zscloud", "zsapi", "net"}
+
+
+def _clean_vanity(value):
+    """Accept 'acme', 'acme.zslogin.net' or a pasted https://acme.zslogin.net/... URL."""
+    v = value.lower().strip()
+    v = v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    cloud = ""
+    if ".zslogin" in v:
+        v, rest = v.split(".zslogin", 1)
+        cloud = rest.split(".", 1)[0]
+    return v, cloud
 
 
 def load_config():
