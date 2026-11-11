@@ -81,6 +81,9 @@ label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-s
 .links .linklab::before{content:"";position:absolute;left:50%;bottom:100%;height:10px;border-left:1px dashed #4A7FB8}
 .links.multi::before,.links.multi::after{content:"";position:absolute;left:18%;right:18%;border-top:1px dashed #4A7FB8}
 .links.multi::before{top:0}.links.multi::after{bottom:-12px}
+.leafbox.wide{width:min(660px,80vw)}
+button.chip{min-height:44px;text-align:left;cursor:pointer;font:inherit;font-size:12px;color:var(--text);background:var(--inset);line-height:1.35}
+button.chip.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--mute);margin-top:6px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
@@ -327,7 +330,7 @@ function icon(kind) {
 }
 const treeSel = {};
 function chipEl(c) {
-  return $("div", {class: "chip"}, $("div", {style: "font-weight:500;overflow-wrap:anywhere"}, c.ok != null && $("span", {class: c.ok ? "ok" : "crit"}, c.ok ? "● " : "✕ "), c.name || dash), c.sub ? $("div", {class: "mute", style: "overflow-wrap:anywhere"}, c.sub) : null);
+  return $(c.onclick ? "button" : "div", c.onclick ? {type: "button", class: "chip" + (c.sel ? " sel" : ""), "aria-pressed": c.sel ? "true" : "false", onclick: c.onclick} : {class: "chip"}, $("div", {style: "font-weight:500;overflow-wrap:anywhere"}, c.ok != null && $("span", {class: c.ok ? "ok" : "crit"}, c.ok ? "● " : "✕ "), c.name || dash), c.sub ? $("div", {class: "mute", style: "overflow-wrap:anywhere"}, c.sub) : null);
 }
 function chipList(list, max) {
   return $("div", {class: "chips"}, list.slice(0, max).map(chipEl), list.length > max && $("div", {class: "chip mute", style: "display:flex;align-items:center"}, "… " + (list.length - max) + " more"));
@@ -339,7 +342,7 @@ function treeMap(key, title, roots, opts) {
   const node = n => {
     index[n.id] = n;
     const kids = (n.children || []).map(node);
-    if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox"}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, 6))));
+    if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox" + (n.leafWide ? " wide" : "")}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, n.leafMax || 6))));
     return $("li", null, (n.links || (n.link ? [{text: n.link, down: n.linkDown}] : [])).length ? $("div", {class: "links" + ((n.links || []).length > 1 ? " multi" : "")}, (n.links || [{text: n.link, down: n.linkDown}]).map(l => $("span", {class: "linklab" + (l.down ? " down" : "")}, l.text))) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
       $("span", {class: "nm"}, icon(n.kind), n.title),
       n.sub ? $("span", {class: "mute"}, n.sub) : null,
@@ -500,13 +503,13 @@ function zdxUsers() {
     return Object.assign({}, u, {score: scores.length ? Math.min.apply(null, scores) : null, locs: [].concat.apply([], u.devices.map(x => x.locations.length ? x.locations : x.geo)).filter((v, i, a) => v && a.indexOf(v) === i)}); });
   const groups = {}; users.forEach(u => { (u.locs.length ? u.locs : [u.detailed ? "Location not reported" : "Not detailed"]).forEach(l => { (groups[l] = groups[l] || []).push(u); }); });
   const order = Object.keys(groups).sort((a, b) => (a === "Not detailed") - (b === "Not detailed") || groups[b].length - groups[a].length || a.localeCompare(b));
-  const leaf = u => ({name: u.name || u.email, sub: (u.devices.length ? u.devices.length + " device" + (u.devices.length === 1 ? "" : "s") : "No device detail") + (u.score != null ? " · score " + u.score : ""), ok: u.score == null ? null : u.score >= 66});
+  const leaf = u => ({sel: zu.sel === String(u.id), onclick: () => { zu.sel = zu.sel === String(u.id) ? "" : String(u.id); render(); const t = document.getElementById("zudetail"); if (t) t.scrollIntoView({block: "nearest"}); }, name: u.name || u.email, sub: (u.devices.length ? u.devices.length + " device" + (u.devices.length === 1 ? "" : "s") : "No device detail") + (u.score != null ? " · score " + u.score : ""), ok: u.score == null ? null : u.score >= 66 ? true : u.score < 34 ? false : null});
   const root = {id: "zu", kind: "cloud", title: "ZDX users", sub: label[1] + " · " + label[2], lines: [d.total + " active user" + (d.total === 1 ? "" : "s"), order.filter(l => l !== "Not detailed").length + " locations"],
     children: order.slice(0, 12).map(l => { const g = groups[l], sc = g.map(u => u.score).filter(x => x != null), avg = sc.length ? Math.round(sc.reduce((a, b) => a + b, 0) / sc.length) : null;
-      return {id: "zu:" + l, kind: l === "Not detailed" || l === "Location not reported" ? "other" : "switch", title: l, sub: "Location", status: avg == null ? null : {ok: avg >= 66 ? true : avg >= 34 ? null : false, text: "Average score " + avg}, lines: [g.length + " user" + (g.length === 1 ? "" : "s")], leafTitle: "Users", leaves: g.map(leaf)}; })};
+      return {id: "zu:" + l, kind: l === "Not detailed" || l === "Location not reported" ? "other" : "switch", title: l, sub: "Location", status: avg == null ? null : {ok: avg >= 66 ? true : avg >= 34 ? null : false, text: "Average score " + avg}, lines: [g.length + " user" + (g.length === 1 ? "" : "s")], leafTitle: "Users", leafMax: 80, leafWide: g.length > 8, leaves: g.map(leaf)}; })};
   const sel = users.find(u => String(u.id) === zu.sel), q = zu.q.trim().toLowerCase();
   const list = users.filter(u => !q || [u.name, u.email].concat(u.locs).some(x => String(x || "").toLowerCase().includes(q)));
-  const detail = sel && $("div", {class: "inset", style: "margin:14px 0"}, $("div", {class: "head"}, $("strong", null, sel.name || sel.email), $("button", {type: "button", onclick: () => { zu.sel = ""; render(); }}, "Close")),
+  const detail = sel && $("div", {class: "inset", id: "zudetail", style: "margin:14px 0"}, $("div", {class: "head"}, $("strong", null, sel.name || sel.email), $("button", {type: "button", onclick: () => { zu.sel = ""; render(); }}, "Close")),
     kv("Email", sel.email || null), kv("Lowest device score", sel.score == null ? null : scoreTxt(sel.score), scoreCls(sel.score)),
     sel.devices.length ? sel.devices.map(x => $("div", {style: "margin-top:12px"}, $("div", {style: "font-weight:600"}, x.name || "Device"),
       kv("Zscaler location", x.locations.join(", ") || null), kv("Geolocation", x.geo.join("; ") || null), kv("Device score", x.score == null ? null : scoreTxt(x.score), scoreCls(x.score)),
@@ -514,7 +517,7 @@ function zdxUsers() {
   const max = 200;
   return [$("section", {class: "card"}, head,
       $("p", {class: "note", style: "margin:0"}, d.total + " users active in the " + label[2] + ". Devices, locations and scores are loaded for " + d.detailed + " of them" + (d.limited ? " (Zscaler rate limit reached)" : "") + ". Updated " + ago(d.updated) + " ago.")),
-    treeMap("zdxusers", "User map · " + label[1], [root], {hint: "Users grouped by where ZDX saw them. Select a location to list its users."}),
+    treeMap("zdxusers", "User map · " + label[1], [root], {hint: "Users grouped by where ZDX saw them. Select a user to see their devices and scores."}),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Users · " + label[1])),
       detail,
       $("label", {for: "zuq", style: "max-width:420px;margin-bottom:10px"}, "Search user, email or location", $("input", {id: "zuq", type: "search", value: zu.q, autocomplete: "off", spellcheck: "false", oninput: ev => { zu.q = ev.target.value; render(); }})),

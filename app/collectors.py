@@ -623,7 +623,7 @@ async def _aiguard(c, base, tok):
     return out
 
 
-async def zdx_users(cfg, hours, max_detail=50):
+async def zdx_users(cfg, hours, max_detail=150):
     """ZDX users active in the last `hours`, with their devices, locations and app scores.
 
     Costs one request per page of users plus up to two per detailed user, so it is run on a
