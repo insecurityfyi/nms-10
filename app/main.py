@@ -1,7 +1,9 @@
 """NSM-10: read-only monitoring for SNMP, UniFi, Proxmox VE and Zscaler."""
 import asyncio
 import os
+import re
 import time
+from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -12,9 +14,9 @@ from . import collectors, store
 COOKIE = "nsm_session"
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 LABELS = {"snmp": "SNMP", "unifi": "UniFi", "proxmox": "Proxmox", "firewalla": "Firewalla", "zia": "ZIA", "zpa": "ZPA",
-          "zdx": "ZDX", "aiguard": "AI Security"}
+          "zdx": "ZDX", "aiguard": "AI Security", "ztw": "Zero Trust Branch"}
 
-state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": []}
+state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": [], "endpoints": []}
 _prev_counters = {}
 _alert_since = {}
 _wake = asyncio.Event()
@@ -26,7 +28,7 @@ def build_alerts(src):
     def add(sev, source, key, msg):
         found.append({"severity": sev, "source": LABELS[source], "key": f"{source}:{key}", "message": msg})
 
-    for name in ("unifi", "proxmox", "firewalla", "zia", "zpa", "zdx", "aiguard"):
+    for name in ("unifi", "proxmox", "firewalla", "zia", "zpa", "zdx", "aiguard", "ztw"):
         s = src.get(name, {})
         if s.get("configured") and not s.get("ok"):
             add("warning", name, "source", f"{LABELS[name]} could not be polled: {s.get('error') or 'unknown error'}")
@@ -73,6 +75,11 @@ def build_alerts(src):
     for c in zpa.get("connectors", []) if zpa.get("ok") else []:
         if c["enabled"] and not c["healthy"]:
             add("warning", "zpa", c["name"] + ":conn", f"App Connector {c['name']} is {c['status'].lower()}")
+    ztw = src.get("ztw", {})
+    for g in ztw.get("groups", []) if ztw.get("ok") else []:
+        for v in g["vms"]:
+            if not v["healthy"]:
+                add("warning", "ztw", f"{g['name']}:{v['name']}", f"Branch Connector {v['name']} is {v['status'].lower()}")
     zdx = src.get("zdx", {})
     for a in zdx.get("apps", []) if zdx.get("ok") else []:
         if a["score"] is not None and a["score"] < 66:
@@ -89,6 +96,64 @@ def build_alerts(src):
     return found
 
 
+def _mac(value):
+    """Normalise a MAC ('mac:aa-bb-..', 'AA:BB:..') to AA:BB:CC:DD:EE:FF, or '' if it is not one."""
+    hexes = re.sub(r"[^0-9A-Fa-f]", "", str(value or "").split("mac:", 1)[-1])
+    return ":".join(hexes[i:i + 2] for i in range(0, 12, 2)).upper() if len(hexes) == 12 else ""
+
+
+def _epoch(value):
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 1e11 else value
+    try:
+        text = str(value)
+        return float(text) if re.fullmatch(r"[0-9.]+", text) else datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def build_endpoints(src):
+    """One record per client device, merging UniFi clients and Firewalla devices by MAC (else IP)."""
+    out = {}
+
+    def rec(mac, ip, name):
+        key = mac or ip or name
+        if not key:
+            return None
+        return out.setdefault(key, {
+            "key": key, "name": "", "ip": "", "mac": mac, "vendor": "", "online": None, "conn": "",
+            "connected_to": "", "site": "", "network": "", "group": "", "box": "", "connected_at": None,
+            "last_seen": None, "download": None, "upload": None, "ip_reserved": None, "sources": []})
+
+    u = src.get("unifi", {})
+    if u.get("ok"):
+        names = {d["id"]: d["name"] for d in u.get("devices", []) if d.get("id")}
+        for c in u.get("client_list", []):
+            e = rec(_mac(c.get("mac")), c.get("ip"), c.get("name"))
+            if not e:
+                continue
+            e.update(name=c.get("name") or e["name"], ip=c.get("ip") or e["ip"], online=True,
+                     conn=c.get("type") if c.get("type") in ("wired", "wireless") else e["conn"],
+                     connected_to=names.get(c.get("uplink"), ""), site=c.get("site") or "",
+                     connected_at=_epoch(c.get("connected_at")))
+            e["sources"].append("UniFi")
+    f = src.get("firewalla", {})
+    if f.get("ok"):
+        boxes = {b["gid"]: b["name"] for b in f.get("boxes", [])}
+        for d in f.get("device_list", []):
+            e = rec(_mac(d.get("mac")), d.get("ip"), d.get("name"))
+            if not e:
+                continue
+            e.update(name=e["name"] or d.get("name") or "", ip=e["ip"] or d.get("ip") or "",
+                     vendor=d.get("vendor") or "", network=d.get("network") or "", group=d.get("group") or "",
+                     box=boxes.get(d.get("gid"), ""), last_seen=_epoch(d.get("last_seen")),
+                     download=d.get("download"), upload=d.get("upload"), ip_reserved=d.get("ip_reserved"))
+            if e["online"] is None:
+                e["online"] = bool(d.get("online"))
+            e["sources"].append("Firewalla")
+    return sorted(out.values(), key=lambda e: (not e["online"], (e["name"] or e["ip"] or e["key"]).lower()))[:5000]
+
+
 async def poll_loop():
     while True:
         interval = 60
@@ -97,7 +162,8 @@ async def poll_loop():
             interval = cfg["poll_interval"]
             state["polling"] = True
             src = await collectors.collect_all(cfg, _prev_counters)
-            state.update(sources=src, alerts=build_alerts(src), updated=time.time(), interval=interval)
+            state.update(sources=src, alerts=build_alerts(src), endpoints=build_endpoints(src),
+                         updated=time.time(), interval=interval)
         except Exception as e:  # noqa: BLE001 - keep the loop alive
             print("poll failed:", repr(e), flush=True)
         finally:

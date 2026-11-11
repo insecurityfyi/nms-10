@@ -6,7 +6,9 @@ Read-only monitoring dashboard for a small network:
 - **Ubiquiti UniFi** via the UniFi Network Integration API (API key), with a topology map
 - **Proxmox VE** via API token: nodes, guests, storage
 - **Firewalla** via the MSP API: boxes, device counts, active alarms
-- **Zscaler** via OneAPI: ZIA, ZPA, ZDX and AI Security (AI Guard)
+- **Zscaler** via OneAPI: ZIA, ZPA, ZDX, AI Security (AI Guard) and Zero Trust Branch, including the
+  Zscaler data center each connector is attached to
+- **Endpoints**: one searchable list of client devices merged from UniFi and Firewalla
 
 All credentials are entered in the app under **Settings & credentials**. They are
 encrypted on disk in the `nsm_data` Docker volume and never returned to the browser.

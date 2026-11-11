@@ -5,14 +5,15 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
 
 ## Layout
 
-- `app/main.py` - FastAPI app: auth, API routes, poll loop, alert rules (`build_alerts`)
+- `app/main.py` - FastAPI app: auth, API routes, poll loop, alert rules (`build_alerts`),
+  endpoint merge (`build_endpoints`: UniFi clients + Firewalla devices by MAC)
 - `app/collectors.py` - one collector per source; each returns `{"configured", "ok", "error", ...}`
   - SNMP: shells out to net-snmp (`snmpget`/`snmpwalk`); `discover()` scans a range
   - UniFi: Network Integration API, `X-API-KEY`, `/proxy/network/integration/v1`
   - Proxmox VE: API token, `/api2/json/cluster/resources`
   - Firewalla MSP API: `Authorization: Token <token>`, `https://<msp domain>/v2/{boxes,devices,alarms}`
   - Zscaler OneAPI: token from `https://<vanity>.zslogin<cloud>.net/oauth2/v1/token`,
-    then `/zia/api/v1`, `/zpa/mgmtconfig/v1/admin/customers/<id>`, `/zdx/v1`, `/aiguard/v1`
+    then `/zia/api/v1`, `/zpa/mgmtconfig/v1/admin/customers/<id>`, `/zdx/v1`, `/aiguard/v1`, `/ztw/api/v1/ecgroup`
 - `app/store.py` - SQLite + Fernet-encrypted settings, admin password, sessions
 - `app/static/index.html` - whole UI in one file, vanilla JS, no build step
 - `Dockerfile`, `docker-compose.yml`, `install.sh`, `deploy.ps1` - packaging and deploy

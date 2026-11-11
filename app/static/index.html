@@ -145,9 +145,9 @@ async function refresh(force) {
 }
 
 /* ---------- layout ---------- */
-const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"]]],
+const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"], ["endpoints", "Endpoints"]]],
   ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"], ["firewalla", "Firewalla"]]],
-  ["Zscaler", [["zscaler", "ZIA · ZPA · ZDX · AI Security"]]],
+  ["Zscaler", [["zscaler", "Zscaler"]]],
   ["Admin", [["settings", "Settings & credentials"]]]];
 function navEl() {
   const n = state ? state.alerts.length : 0;
@@ -159,18 +159,21 @@ function navEl() {
       $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
 }
 function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
-const TITLES = {overview: "Overview", alerts: "Alerts", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", settings: "Settings & credentials"};
+const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", settings: "Settings & credentials"};
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
   const topo = document.getElementById("topo"), keep = topo ? topo.scrollLeft : 0;
-  const body = {overview: vOverview, alerts: vAlerts, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, settings: vSettings}[view]();
+  const act = document.activeElement, actId = act && act.id, caret = act && act.tagName === "INPUT" ? act.selectionStart : null;
+  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
       $("button", {type: "button", onclick: async () => { await api("/api/poll", "POST", {}); setTimeout(() => refresh(false), 3000); }}, "Poll now")),
     body)));
   const t2 = document.getElementById("topo"); if (t2 && keep) t2.scrollLeft = keep;
+  const again = actId && document.getElementById(actId);
+  if (again) { again.focus(); if (caret != null) { try { again.setSelectionRange(caret, caret); } catch (e) {} } }
 }
 function notReady(name, label) {
   const s = src(name);
@@ -215,6 +218,44 @@ function alertList(list) {
   return $("div", null, list.map(a => $("div", {class: "alert"},
     $("div", {class: "top"}, $("span", {class: a.severity === "critical" ? "crit" : "warn", style: "font-weight:600"}, (a.severity === "critical" ? "✕ CRITICAL" : "▲ WARNING") + " · " + a.source.toUpperCase()), $("span", {class: "mute"}, ago(a.since))),
     $("div", null, a.message))));
+}
+function bytes(n) { if (n == null) return dash; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)) + " " + u[i]; }
+const ep = {q: "", show: "all", sort: "name", sel: ""};
+function vEndpoints() {
+  const all = state.endpoints || [];
+  if (!all.length) return $("section", {class: "card"}, $("div", {class: "empty"}, "No endpoints yet. Endpoints come from UniFi clients and Firewalla devices. ", $("a", {href: "#settings", style: "color:var(--accent)"}, "Open settings")));
+  const n = f => all.filter(f).length, q = ep.q.trim().toLowerCase();
+  const tiles = $("section", {class: "tiles", "aria-label": "Endpoint totals"},
+    [["Endpoints", all.length, "known"], ["Online", n(e => e.online), "now"], ["Offline", n(e => e.online === false), "known, not connected"], ["Wired", n(e => e.conn === "wired"), "per UniFi"], ["Wi-Fi", n(e => e.conn === "wireless"), "per UniFi"]]
+      .map(([k, v, sub]) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v), $("div", {class: "s mute"}, sub))));
+  let list = all.filter(e => (ep.show === "all" || (ep.show === "online" && e.online) || (ep.show === "offline" && e.online === false) || (ep.show === "wired" && e.conn === "wired") || (ep.show === "wireless" && e.conn === "wireless"))
+    && (!q || [e.name, e.ip, e.mac, e.vendor, e.network, e.group, e.connected_to, e.box].some(x => String(x || "").toLowerCase().includes(q))));
+  if (ep.sort === "download") list = list.slice().sort((a, b) => (b.download || 0) - (a.download || 0));
+  else if (ep.sort === "upload") list = list.slice().sort((a, b) => (b.upload || 0) - (a.upload || 0));
+  else if (ep.sort === "seen") list = list.slice().sort((a, b) => (b.last_seen || b.connected_at || 0) - (a.last_seen || a.connected_at || 0));
+  const sel = all.find(e => e.key === ep.sel), conn = e => e.conn === "wired" ? "Wired" : e.conn === "wireless" ? "Wi-Fi" : dash;
+  const status = e => $("span", {class: e.online ? "ok" : e.online === false ? "mute" : "mute"}, e.online ? "● Online" : e.online === false ? "○ Offline" : dash);
+  const pick = (id, label, key, opts) => $("label", {for: id, style: "flex:0 1 180px"}, label, $("select", {id: id, onchange: ev => { ep[key] = ev.target.value; render(); }}, opts.map(([v, t]) => $("option", {value: v, selected: ep[key] === v}, t))));
+  const detail = sel && $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, sel.name || sel.ip || sel.mac), $("button", {type: "button", onclick: () => { ep.sel = ""; render(); }}, "Close")),
+    $("div", {class: "grid4"},
+      $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Identity"), kv("Name", sel.name || null), kv("IP address", sel.ip || null), kv("MAC address", sel.mac || null), kv("Vendor", sel.vendor || null), kv("Group", sel.group || null), kv("Seen by", sel.sources.join(", "))),
+      $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Connectivity"), kv("Status", sel.online ? "Online" : sel.online === false ? "Offline" : null, sel.online ? "ok" : ""), kv("Connection", conn(sel)), kv("Connected to", sel.connected_to || null), kv("UniFi site", sel.site || null), kv("Network", sel.network || null), kv("Firewalla box", sel.box || null), kv("Reserved IP", sel.ip_reserved == null ? null : sel.ip_reserved ? "Yes" : "No")),
+      $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Statistics"), kv("Connected for", sel.connected_at ? ago(sel.connected_at) : null), kv("Last seen", sel.last_seen ? ago(sel.last_seen) + " ago" : null), kv("Total download", sel.download == null ? null : bytes(sel.download)), kv("Total upload", sel.upload == null ? null : bytes(sel.upload)))));
+  const max = 300;
+  return [tiles, detail,
+    $("section", {class: "card"},
+      $("div", {style: "display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:12px"},
+        $("label", {for: "epq", style: "flex:1 1 260px"}, "Search name, IP, MAC, vendor, network", $("input", {id: "epq", type: "search", value: ep.q, autocomplete: "off", spellcheck: "false", oninput: ev => { ep.q = ev.target.value; render(); }})),
+        pick("epshow", "Show", "show", [["all", "All"], ["online", "Online"], ["offline", "Offline"], ["wired", "Wired"], ["wireless", "Wi-Fi"]]),
+        pick("epsort", "Sort by", "sort", [["name", "Status, then name"], ["download", "Download"], ["upload", "Upload"], ["seen", "Most recent"]])),
+      $("div", {class: "mute", role: "status", style: "margin-bottom:6px"}, list.length + " of " + all.length + " endpoints" + (list.length > max ? ", showing the first " + max : "")),
+      list.length ? $("div", {class: "scroll"}, $("table", null,
+        $("thead", null, $("tr", null, ["Endpoint", "IP address", "MAC address", "Status", "Connection", "Connected to", "Network", "Download", "Upload", "Last seen"].map(h => $("th", null, h)))),
+        $("tbody", null, list.slice(0, max).map(e => $("tr", null,
+          $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (ep.sel === e.key ? ";border-color:var(--accent)" : ""), "aria-pressed": ep.sel === e.key ? "true" : "false", onclick: () => { ep.sel = ep.sel === e.key ? "" : e.key; render(); window.scrollTo({top: 0}); }}, e.name || e.ip || e.mac), e.vendor ? $("span", {class: "mute"}, "  " + e.vendor) : null),
+          $("td", {class: "mono"}, e.ip || dash), $("td", {class: "mono mute"}, e.mac || dash), $("td", null, status(e)), $("td", null, conn(e)),
+          $("td", null, e.connected_to || dash), $("td", null, e.network || dash), $("td", {class: "mono"}, bytes(e.download)), $("td", {class: "mono"}, bytes(e.upload)),
+          $("td", {class: "mono mute"}, e.online && !e.last_seen ? "now" : e.last_seen ? ago(e.last_seen) + " ago" : dash)))))) : $("div", {class: "empty"}, "No endpoints match."))];
 }
 const vAlerts = () => $("section", {class: "card"}, alertList(state.alerts));
 function snmpTable(devs) {
@@ -381,9 +422,19 @@ function zscalerTopology() {
   const zia = src("zia"), zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard"), kids = [];
   const fail = (id, t, s) => ({id: id, kind: "cloud", title: t, status: {ok: null, text: "Poll failed"}});
   if (zia.configured) kids.push(zia.ok ? {id: "zia", kind: "cloud", title: "ZIA", sub: "Internet Access", status: {ok: zia.status === "ACTIVE" ? true : null, text: zia.status === "ACTIVE" ? "Config active" : (zia.status || "Unknown").toLowerCase()}, lines: [zia.locations != null && zia.locations + " locations", zia.url_rules != null && zia.url_rules + " URL rules", zia.fw_rules != null && zia.fw_rules + " firewall rules"]} : fail("zia", "ZIA"));
+  const byDc = (prefix, items, dcOf, leaf) => { const m = {}; items.forEach(x => { const k = dcOf(x) || "Not connected"; (m[k] = m[k] || []).push(x); });
+    return Object.keys(m).sort().map(k => ({id: prefix + ":" + k, kind: k === "Not connected" ? "other" : "cluster", title: k, sub: k === "Not connected" ? "No data center reported" : "Zscaler data center", status: k === "Not connected" ? {ok: null, text: "No connection"} : null, lines: [m[k].length + " connector" + (m[k].length === 1 ? "" : "s")], leafTitle: "Connectors", leaves: m[k].map(leaf)})); };
   if (zpa.configured) { if (zpa.ok) { const groups = {}; zpa.connectors.forEach(c => { (groups[c.group || "App Connectors"] = groups[c.group || "App Connectors"] || []).push(c); });
       kids.push({id: "zpa", kind: "cloud", title: "ZPA", sub: "Private Access", lines: [zpa.segments != null && zpa.segments + " app segments", zpa.connectors.length + " connectors"],
-        children: Object.keys(groups).sort().map(g => ({id: "zpa:" + g, kind: "switch", title: g, sub: "Connector group", lines: [groups[g].filter(c => c.healthy).length + " of " + groups[g].length + " healthy"], leafTitle: "Connectors", leaves: groups[g].map(c => ({name: c.name, sub: c.enabled ? c.status : "Disabled", ok: c.enabled ? c.healthy : null}))}))}); } else kids.push(fail("zpa", "ZPA")); }
+        children: Object.keys(groups).sort().map(g => ({id: "zpa:" + g, kind: "switch", title: g, sub: "App Connector group", lines: [groups[g].filter(c => c.healthy).length + " of " + groups[g].length + " healthy"],
+          children: byDc("zpa:" + g, groups[g], c => c.broker, c => ({name: c.name, sub: (c.enabled ? c.status : "Disabled") + (c.public_ip ? " · " + c.public_ip : ""), ok: c.enabled ? c.healthy : null}))}))}); } else kids.push(fail("zpa", "ZPA")); }
+  const ztw = src("ztw");
+  if (ztw.configured) { if (ztw.ok) { const n = ztw.groups.reduce((t, g) => t + g.vms.length, 0);
+      kids.push({id: "ztw", kind: "cloud", title: "Zero Trust Branch", sub: "Cloud & Branch Connector", lines: [ztw.groups.length + " groups", n + " connectors"],
+        children: ztw.groups.map(g => { const leaf = v => ({name: v.name, sub: v.status + (v.nat_ip ? " · " + v.nat_ip : ""), ok: v.healthy});
+          return {id: "ztw:" + g.name, kind: "switch", title: g.name, sub: "Connector group" + (g.location ? " · " + g.location : ""), lines: [g.platform, g.vms.filter(v => v.healthy).length + " of " + g.vms.length + " healthy"],
+            children: byDc("ztw:" + g.name + ":zia", g.vms.filter(v => v.zia_gateway), v => "ZIA · " + v.zia_gateway, leaf).concat(byDc("ztw:" + g.name + ":zpa", g.vms.filter(v => v.zpa_broker), v => "ZPA · " + v.zpa_broker, leaf))
+              .concat(g.vms.some(v => !v.zia_gateway && !v.zpa_broker) ? byDc("ztw:" + g.name + ":none", g.vms.filter(v => !v.zia_gateway && !v.zpa_broker), v => "", leaf) : [])}; })}); } else kids.push(fail("ztw", "Zero Trust Branch")); }
   if (zdx.configured) kids.push(zdx.ok ? {id: "zdx", kind: "cloud", title: "ZDX", sub: "Digital Experience", lines: [zdx.score != null && "Average score " + zdx.score, zdx.alerts != null && zdx.alerts + " ongoing alerts"], leafTitle: "Applications", leaves: zdx.apps.map(a => ({name: a.name, sub: a.score == null ? "No score" : "Score " + a.score, ok: a.score == null ? null : a.score >= 66}))} : fail("zdx", "ZDX"));
   if (ai.configured) kids.push(ai.ok ? {id: "ai", kind: "cloud", title: "AI Security", sub: "AI Guard", lines: [ai.providers != null && ai.providers + " LLM providers", ai.applications != null && ai.applications + " LLM applications"], leafTitle: "Detection policies", leaves: ai.policy_names.map(n => ({name: n}))} : fail("ai", "AI Security"));
   if (!kids.length) return null;
@@ -424,13 +475,18 @@ function zsPanels() {
     zsPanel("zia", "ZIA · Internet Access", s => [kv("Configuration", s.status === "ACTIVE" ? "Active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn"), kv("URL filtering rules", s.url_rules), kv("Firewall rules", s.fw_rules), kv("Locations", s.locations)]),
     zsPanel("zpa", "ZPA · Private Access", s => { const h = s.connectors.filter(c => c.healthy).length; return [kv("App Connectors", (h === s.connectors.length ? "" : "▲ ") + h + " of " + s.connectors.length + " healthy", h === s.connectors.length ? "" : "warn"), kv("App segments", s.segments)]; }),
     zsPanel("zdx", "ZDX · Digital Experience", s => [kv("Average app score", s.score == null ? null : s.score + " / 100"), kv("Monitored apps", s.apps.length), kv("Ongoing alerts", s.alerts)]),
+    zsPanel("ztw", "Zero Trust Branch", s => { const vms = s.groups.reduce((a, g) => a.concat(g.vms), []), h = vms.filter(v => v.healthy).length; return [kv("Connector groups", s.groups.length), kv("Connectors", (h === vms.length ? "" : "▲ ") + h + " of " + vms.length + " healthy", h === vms.length ? "" : "warn")]; }),
     zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
 }
 function vZscaler() {
   const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
   if (zpa.ok && zpa.connectors.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZPA App Connectors")), $("div", {class: "scroll"}, $("table", null,
-    $("thead", null, $("tr", null, ["Connector", "Status", "Version"].map(h => $("th", null, h)))),
-    $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", {class: "mono mute"}, c.version || dash))))))));
+    $("thead", null, $("tr", null, ["Connector", "Group", "Status", "Data center", "Public IP", "Version"].map(h => $("th", null, h)))),
+    $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", null, c.group || dash), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", null, c.broker || dash), $("td", {class: "mono mute"}, c.public_ip || dash), $("td", {class: "mono mute"}, c.version || dash))))))));
+  const ztw = src("ztw");
+  if (ztw.ok && ztw.groups.some(g => g.vms.length)) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Zero Trust Branch connectors")), $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Connector", "Group", "Status", "ZIA data center", "ZPA data center", "NAT IP", "Version"].map(h => $("th", null, h)))),
+    $("tbody", null, ztw.groups.map(g => g.vms.map(v => $("tr", null, $("td", {style: "font-weight:500"}, v.name), $("td", null, g.name), $("td", {class: v.healthy ? "ok" : "warn"}, (v.healthy ? "● " : "▲ ") + v.status), $("td", null, v.zia_gateway || dash), $("td", null, v.zpa_broker || dash), $("td", {class: "mono mute"}, v.nat_ip || dash), $("td", {class: "mono mute"}, v.version || dash)))))))));
   if (zdx.ok && zdx.apps.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZDX application scores")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Application", "Score", "Users"].map(h => $("th", null, h)))),
     $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
@@ -509,7 +565,7 @@ function renderSettings() {
       $("div", {class: "form"}, field(S.firewalla, "enabled", "Enabled", {type: "checkbox"}), field(S.firewalla, "domain", "MSP domain", {placeholder: "mydomain.firewalla.net"}), field(S.firewalla, "token", "Personal access token", pw))),
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
-      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}))),
+      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Zero Trust Branch", {type: "checkbox"}))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }

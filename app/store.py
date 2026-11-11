@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
     "firewalla": {"enabled": False, "domain": "", "token": ""},
     "zscaler": {
         "enabled": False, "vanity": "", "cloud": "", "client_id": "", "client_secret": "",
-        "zpa_customer_id": "", "zia": True, "zpa": True, "zdx": True, "aiguard": True,
+        "zpa_customer_id": "", "zia": True, "zpa": True, "zdx": True, "aiguard": True, "ztw": True,
     },
 }
 

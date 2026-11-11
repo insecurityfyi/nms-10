@@ -287,7 +287,9 @@ async def collect_unifi(cfg):
                     clients[kind] += 1
                     if len(client_list) < 3000:
                         client_list.append({"name": cl.get("name") or cl.get("macAddress") or "", "ip": cl.get("ipAddress") or "",
-                                            "type": kind, "uplink": str(cl.get("uplinkDeviceId") or "")})
+                                            "type": kind, "uplink": str(cl.get("uplinkDeviceId") or ""),
+                                            "mac": cl.get("macAddress") or "", "connected_at": cl.get("connectedAt"),
+                                            "site": sname})
         by_id = {d["id"]: d for d in devices if d["id"]}
         for cl in client_list:
             if cl["uplink"] in by_id:
@@ -389,7 +391,11 @@ async def collect_firewalla(cfg):
                 out["device_list"] = [{
                     "name": d.get("name") or d.get("ip") or "", "ip": d.get("ip") or "", "online": bool(d.get("online")),
                     "gid": d.get("gid") or "",
-                    "network": (d.get("network") or {}).get("name") or "" if isinstance(d.get("network"), dict) else ""}
+                    "network": (d.get("network") or {}).get("name") or "" if isinstance(d.get("network"), dict) else "",
+                    "group": (d.get("group") or {}).get("name") or "" if isinstance(d.get("group"), dict) else "",
+                    "mac": d.get("id") or "", "vendor": d.get("macVendor") or "", "last_seen": d.get("lastSeen"),
+                    "download": d.get("totalDownload"), "upload": d.get("totalUpload"),
+                    "ip_reserved": bool(d.get("ipReserved"))}
                     for d in devs[:3000]]
             except httpx.HTTPError:
                 pass
@@ -499,7 +505,10 @@ async def _zpa(c, base, tok, customer):
             "status": st.replace("ZPN_STATUS_", "").replace("_", " ").title() or "Unknown",
             "healthy": bool(x.get("enabled", True)) and st.endswith("AUTHENTICATED"),
             "version": x.get("currentVersion") or "",
-            "group": x.get("appConnectorGroupName") or ""})
+            "group": x.get("appConnectorGroupName") or "",
+            # the ZPA broker (Zscaler data center) holding this connector's control connection
+            "broker": x.get("ctrlBrokerName") or "", "location": x.get("location") or "",
+            "public_ip": x.get("publicIp") or ""})
     try:
         body = await _zs_get(c, f"{root}/application", tok, {"page": 1, "pagesize": 500})
         total = body.get("totalCount") if isinstance(body, dict) else None
@@ -507,6 +516,34 @@ async def _zpa(c, base, tok, customer):
     except httpx.HTTPError:
         pass
     return out
+
+
+def _nm(v):
+    """Name of a referenced object that may arrive as a string or as {"name": ...}."""
+    if isinstance(v, dict):
+        return str(v.get("name") or v.get("id") or "")
+    return str(v or "")
+
+
+async def _ztw(c, base, tok):
+    """Zero Trust Branch / Cloud & Branch Connector groups and the gateways their VMs use."""
+    groups = []
+    for g in _as_list(await _zs_get(c, f"{base}/ztw/api/v1/ecgroup", tok)):
+        if not isinstance(g, dict):
+            continue
+        vms = []
+        for v in g.get("ecVMs") or []:
+            if not isinstance(v, dict):
+                continue
+            st = str(v.get("operationalStatus") or v.get("status") or "")
+            vms.append({"name": v.get("name") or "", "status": st.replace("_", " ").title() or "Unknown",
+                        "healthy": st.upper() in ("ACTIVE", "ENABLED", "HEALTHY", "UP"),
+                        "zia_gateway": _nm(v.get("ziaGateway") or g.get("ziaGateway")),
+                        "zpa_broker": _nm(v.get("zpaBroker") or g.get("zpaBroker")),
+                        "nat_ip": v.get("natIp") or "", "version": v.get("buildVersion") or ""})
+        groups.append({"name": g.get("name") or "", "platform": str(g.get("platform") or ""),
+                       "location": _nm(g.get("location")), "tunnel_mode": str(g.get("tunnelMode") or ""), "vms": vms})
+    return {"groups": groups}
 
 
 async def _zdx(c, base, tok):
@@ -540,7 +577,7 @@ async def _aiguard(c, base, tok):
 
 async def collect_zscaler(cfg):
     z = cfg["zscaler"]
-    products = ("zia", "zpa", "zdx", "aiguard")
+    products = ("zia", "zpa", "zdx", "aiguard", "ztw")
     ready = z["enabled"] and z["vanity"] and z["client_id"] and z["client_secret"]
     if not ready:
         return {p: {"configured": False} for p in products}
@@ -564,7 +601,8 @@ async def collect_zscaler(cfg):
             return {p: ({"configured": True, "ok": False, "error": msg} if z[p] else {"configured": False})
                     for p in products}
         calls = {"zia": lambda: _zia(c, base, tok), "zpa": lambda: _zpa(c, base, tok, z["zpa_customer_id"]),
-                 "zdx": lambda: _zdx(c, base, tok), "aiguard": lambda: _aiguard(c, base, tok)}
+                 "zdx": lambda: _zdx(c, base, tok), "aiguard": lambda: _aiguard(c, base, tok),
+                 "ztw": lambda: _ztw(c, base, tok)}
 
         async def one(p):
             if not z[p]:
