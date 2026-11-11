@@ -331,6 +331,58 @@ async def collect_proxmox(cfg):
         return {"configured": True, "ok": False, "error": _err(e)}
 
 
+# ---- Firewalla MSP API (personal access token) ------------------------------
+
+def _fw_base(domain):
+    # Dedicated MSP domains serve the API at the root; the shared firewalla.net portal under /api.
+    return f"https://{domain}/api/v2" if domain in ("firewalla.net", "www.firewalla.net") else f"https://{domain}/v2"
+
+
+async def collect_firewalla(cfg):
+    f = cfg["firewalla"]
+    if not (f["enabled"] and f["domain"] and f["token"]):
+        return {"configured": False}
+    if not HOST_RE.match(f["domain"]):
+        return {"configured": True, "ok": False, "error": "MSP domain should look like mydomain.firewalla.net"}
+    base, headers = _fw_base(f["domain"]), {"Authorization": f"Token {f['token']}", "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            r = await c.get(base + "/boxes", headers=headers)
+            r.raise_for_status()
+            boxes = [{"gid": b.get("gid") or "", "name": b.get("name") or b.get("model") or "", "model": b.get("model") or "",
+                      "mode": b.get("mode") or "", "online": bool(b.get("online")), "version": b.get("version") or "",
+                      "public_ip": b.get("publicIP") or "", "last_seen": b.get("lastSeen"),
+                      "devices": b.get("deviceCount"), "rules": b.get("ruleCount"), "alarms": b.get("alarmCount")}
+                     for b in _as_list(r.json(), "results") if isinstance(b, dict)]
+            out = {"configured": True, "ok": True, "error": "", "boxes": boxes,
+                   "devices_total": None, "devices_online": None, "alarm_count": None, "alarm_list": []}
+            try:  # optional: device counts
+                r = await c.get(base + "/devices", headers=headers)
+                r.raise_for_status()
+                devs = [d for d in _as_list(r.json(), "results") if isinstance(d, dict)]
+                out["devices_total"] = len(devs)
+                out["devices_online"] = sum(1 for d in devs if d.get("online"))
+            except httpx.HTTPError:
+                pass
+            try:  # optional: active alarms, newest first
+                r = await c.get(base + "/alarms", headers=headers,
+                                params={"query": "status:active", "limit": 50, "sortBy": "ts:desc"})
+                r.raise_for_status()
+                body = r.json()
+                rows = [a for a in _as_list(body, "results") if isinstance(a, dict)]
+                names = {b["gid"]: b["name"] for b in boxes}
+                out["alarm_count"] = body.get("count") if isinstance(body, dict) and isinstance(body.get("count"), int) else len(rows)
+                out["alarm_list"] = [{
+                    "ts": a.get("ts"), "message": str(a.get("message") or "")[:240],
+                    "device": (a.get("device") or {}).get("name") or "" if isinstance(a.get("device"), dict) else "",
+                    "box": names.get(a.get("gid"), "")} for a in rows[:50]]
+            except httpx.HTTPError:
+                pass
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "ok": False, "error": _err(e)}
+
+
 # ---- Zscaler OneAPI (ZIdentity client credentials) --------------------------
 
 _tokens = {}
@@ -474,6 +526,7 @@ async def collect_zscaler(cfg):
 
 
 async def collect_all(cfg, prev):
-    snmp, unifi, proxmox, zs = await asyncio.gather(
-        collect_snmp(cfg, prev), collect_unifi(cfg), collect_proxmox(cfg), collect_zscaler(cfg))
-    return {"snmp": snmp, "unifi": unifi, "proxmox": proxmox, **zs}
+    snmp, unifi, proxmox, firewalla, zs = await asyncio.gather(
+        collect_snmp(cfg, prev), collect_unifi(cfg), collect_proxmox(cfg), collect_firewalla(cfg),
+        collect_zscaler(cfg))
+    return {"snmp": snmp, "unifi": unifi, "proxmox": proxmox, "firewalla": firewalla, **zs}

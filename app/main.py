@@ -11,7 +11,7 @@ from . import collectors, store
 
 COOKIE = "nsm_session"
 STATIC = os.path.join(os.path.dirname(__file__), "static")
-LABELS = {"snmp": "SNMP", "unifi": "UniFi", "proxmox": "Proxmox", "zia": "ZIA", "zpa": "ZPA",
+LABELS = {"snmp": "SNMP", "unifi": "UniFi", "proxmox": "Proxmox", "firewalla": "Firewalla", "zia": "ZIA", "zpa": "ZPA",
           "zdx": "ZDX", "aiguard": "AI Security"}
 
 state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": []}
@@ -26,7 +26,7 @@ def build_alerts(src):
     def add(sev, source, key, msg):
         found.append({"severity": sev, "source": LABELS[source], "key": f"{source}:{key}", "message": msg})
 
-    for name in ("unifi", "proxmox", "zia", "zpa", "zdx", "aiguard"):
+    for name in ("unifi", "proxmox", "firewalla", "zia", "zpa", "zdx", "aiguard"):
         s = src.get(name, {})
         if s.get("configured") and not s.get("ok"):
             add("warning", name, "source", f"{LABELS[name]} could not be polled: {s.get('error') or 'unknown error'}")
@@ -60,6 +60,11 @@ def build_alerts(src):
             pct = round(100 * (s.get("used") or 0) / s["total"])
             if pct >= 85:
                 add("warning", "proxmox", f"{ident}:storage", f"Storage {ident} at {pct}%")
+
+    fw = src.get("firewalla", {})
+    for b in fw.get("boxes", []) if fw.get("ok") else []:
+        if not b["online"]:
+            add("critical", "firewalla", b["gid"] + ":offline", f"Firewalla box {b['name']} is offline")
 
     zia = src.get("zia", {})
     if zia.get("ok") and zia.get("status") and zia["status"] != "ACTIVE":

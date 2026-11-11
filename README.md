@@ -5,6 +5,7 @@ Read-only monitoring dashboard for a small network:
 - **SNMP** devices (v2c and v3): subnet discovery, reachability, uptime, CPU load, uplink traffic
 - **Ubiquiti UniFi** via the UniFi Network Integration API (API key), with a topology map
 - **Proxmox VE** via API token: nodes, guests, storage
+- **Firewalla** via the MSP API: boxes, device counts, active alarms
 - **Zscaler** via OneAPI: ZIA, ZPA, ZDX and AI Security (AI Guard)
 
 All credentials are entered in the app under **Settings & credentials**. They are
@@ -30,6 +31,7 @@ password. Re-run the same command to update.
 | SNMP | range to scan (or a single host), community string or v3 user | read-only |
 | UniFi | console URL, API key | key from Settings > Control Plane > Integrations |
 | Proxmox | API URL (port 8006), token ID, token secret | `PVEAuditor` on `/` |
+| Firewalla | MSP domain, personal access token | Read Only token from MSP Settings > MSP API |
 | Zscaler | vanity domain, client ID and secret, ZPA customer ID | read-only API roles in ZIdentity |
 
 ## Notes

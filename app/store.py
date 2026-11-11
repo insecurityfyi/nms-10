@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 
 DATA = os.environ.get("NSM_DATA", "/data")
 MASK = "********"
-SECRET_KEYS = {"community", "v3_auth_pass", "v3_priv_pass", "api_key", "token_secret", "client_secret"}
+SECRET_KEYS = {"community", "v3_auth_pass", "v3_priv_pass", "api_key", "token_secret", "client_secret", "token"}
 SESSION_TTL = 12 * 3600
 
 DEFAULT_CONFIG = {
@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "snmp": {"devices": []},
     "unifi": {"enabled": False, "url": "", "api_key": "", "verify_tls": False},
     "proxmox": {"enabled": False, "url": "", "token_id": "", "token_secret": "", "verify_tls": False},
+    "firewalla": {"enabled": False, "domain": "", "token": ""},
     "zscaler": {
         "enabled": False, "vanity": "", "cloud": "", "client_id": "", "client_secret": "",
         "zpa_customer_id": "", "zia": True, "zpa": True, "zdx": True, "aiguard": True,
@@ -105,6 +106,8 @@ def normalize(cfg):
         dev["version"] = "3" if dev["version"] == "3" else "2c"
         devices.append(dev)
     out["snmp"]["devices"] = devices[:500]
+    fw = out["firewalla"]
+    fw["domain"] = fw["domain"].lower().split("://", 1)[-1].split("/", 1)[0].strip()
     z = out["zscaler"]
     z["vanity"], cloud_hint = _clean_vanity(z["vanity"])
     cloud = (z["cloud"] or cloud_hint).lower().strip(". ")

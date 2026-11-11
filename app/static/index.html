@@ -144,7 +144,7 @@ async function refresh(force) {
 
 /* ---------- layout ---------- */
 const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"]]],
-  ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"]]],
+  ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"], ["firewalla", "Firewalla"]]],
   ["Zscaler", [["zscaler", "ZIA · ZPA · ZDX · AI Security"]]],
   ["Admin", [["settings", "Settings & credentials"]]]];
 function navEl() {
@@ -157,12 +157,12 @@ function navEl() {
       $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
 }
 function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
-const TITLES = {overview: "Overview", alerts: "Alerts", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", zscaler: "Zscaler", settings: "Settings & credentials"};
+const TITLES = {overview: "Overview", alerts: "Alerts", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", settings: "Settings & credentials"};
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
   const topo = document.getElementById("topo"), keep = topo ? topo.scrollLeft : 0;
-  const body = {overview: vOverview, alerts: vAlerts, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, zscaler: vZscaler, settings: vSettings}[view]();
+  const body = {overview: vOverview, alerts: vAlerts, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
@@ -194,6 +194,7 @@ function vOverview() {
       : tile("#snmp", "SNMP devices", up, "/ " + devs.length + " up", up === devs.length ? "● All responding" : "✕ " + (devs.length - up) + " down", up === devs.length ? "ok" : "crit"),
     srcTile("unifi", "#unifi", "UniFi", s => tile("#unifi", "UniFi", s.clients.total, "clients", (s.counts.online === s.counts.total ? "● " : "▲ ") + s.counts.online + " of " + s.counts.total + " devices online", s.counts.online === s.counts.total ? "ok" : "warn")),
     srcTile("proxmox", "#proxmox", "Proxmox VE", s => { const on = s.nodes.filter(n => n.online).length; return tile("#proxmox", "Proxmox VE", s.guests.length, "guests", (on === s.nodes.length ? "● " : "✕ ") + on + " of " + s.nodes.length + " nodes online", on === s.nodes.length ? "ok" : "crit"); }),
+    srcTile("firewalla", "#firewalla", "Firewalla", s => { const on = s.boxes.filter(b => b.online).length; return tile("#firewalla", "Firewalla", s.alarm_count == null ? dash : s.alarm_count, "active alarms", (on === s.boxes.length ? "\u25CF " : "\u2715 ") + on + " of " + s.boxes.length + " boxes online", on === s.boxes.length ? "ok" : "crit"); }),
     srcTile("zia", "#zscaler", "ZIA", s => tile("#zscaler", "ZIA", s.url_rules == null ? dash : s.url_rules, "URL rules", s.status === "ACTIVE" ? "● Config active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn")),
     srcTile("zpa", "#zscaler", "ZPA", s => { const h = s.connectors.filter(c => c.healthy).length; return tile("#zscaler", "ZPA", s.segments == null ? dash : s.segments, "app segments", (h === s.connectors.length ? "● " : "▲ ") + h + " of " + s.connectors.length + " connectors healthy", h === s.connectors.length ? "ok" : "warn"); }),
     srcTile("zdx", "#zscaler", "ZDX score", s => tile("#zscaler", "ZDX score", s.score == null ? dash : s.score, "/ 100", s.score == null ? "No scored apps" : s.score >= 66 ? "● Good" : s.score >= 34 ? "▲ Okay" : "✕ Poor", s.score == null ? "mute" : s.score >= 66 ? "ok" : s.score >= 34 ? "warn" : "crit")),
@@ -311,6 +312,23 @@ function vUnifi() {
       $("tbody", null, s.devices.map(d => $("tr", null, $("td", {style: "font-weight:500"}, d.name), $("td", null, kinds[d.kind]), $("td", null, d.model), $("td", {class: "mono mute"}, d.ip || dash), $("td", null, d.site),
         $("td", {class: d.state === "ONLINE" ? "ok" : "crit"}, (d.state === "ONLINE" ? "● " : "✕ ") + (d.state || "UNKNOWN").toLowerCase())))))))];
 }
+function vFirewalla() {
+  const bad = notReady("firewalla", "Firewalla"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("firewalla"), sum = k => s.boxes.reduce((n, b) => n + (b[k] || 0), 0);
+  return [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")),
+      kv("Boxes online", s.boxes.filter(b => b.online).length + " of " + s.boxes.length),
+      kv("Devices online", s.devices_total == null ? null : s.devices_online + " of " + s.devices_total),
+      kv("Active alarms", s.alarm_count, s.alarm_count ? "warn" : ""), kv("Rules", sum("rules"))),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Boxes")), $("div", {class: "scroll"}, $("table", null,
+      $("thead", null, $("tr", null, ["Box", "Model", "Mode", "Status", "Version", "Public IP", "Devices", "Rules", "Alarms"].map(h => $("th", null, h)))),
+      $("tbody", null, s.boxes.map(b => $("tr", null, $("td", {style: "font-weight:500"}, b.name), $("td", null, b.model), $("td", null, b.mode || dash),
+        $("td", {class: b.online ? "ok" : "crit"}, b.online ? "\u25CF Online" : "\u2715 Offline"), $("td", {class: "mono mute"}, b.version || dash), $("td", {class: "mono mute"}, b.public_ip || dash),
+        $("td", {class: "mono"}, b.devices == null ? dash : b.devices), $("td", {class: "mono"}, b.rules == null ? dash : b.rules), $("td", {class: "mono"}, b.alarms == null ? dash : b.alarms))))))),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Active alarms"), s.alarm_count > s.alarm_list.length && $("span", {class: "mute"}, "Newest " + s.alarm_list.length + " of " + s.alarm_count)),
+      s.alarm_list.length ? $("div", {class: "scroll"}, $("table", null,
+        $("thead", null, $("tr", null, ["When", "Alarm", "Device", "Box"].map(h => $("th", null, h)))),
+        $("tbody", null, s.alarm_list.map(a => $("tr", null, $("td", {class: "mono mute"}, a.ts ? ago(a.ts) + " ago" : dash), $("td", {style: "white-space:normal;min-width:280px"}, a.message || dash), $("td", null, a.device || dash), $("td", null, a.box || dash)))))) : $("div", {class: "empty"}, "No active alarms."))];
+}
 function zsPanel(name, title, build) {
   const s = src(name), bad = notReady(name, "This product");
   return $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, title), bad || build(s));
@@ -401,6 +419,8 @@ function renderSettings() {
       $("div", {class: "form"}, field(S.unifi, "enabled", "Enabled", {type: "checkbox"}), field(S.unifi, "url", "Console URL", {placeholder: "https://192.168.7.1"}), field(S.unifi, "api_key", "API key", pw), field(S.unifi, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
     $("section", {class: "card"}, $("h2", null, "Proxmox VE"), $("p", {class: "note"}, "Uses an API token. A token with the PVEAuditor role on / is enough for monitoring."),
       $("div", {class: "form"}, field(S.proxmox, "enabled", "Enabled", {type: "checkbox"}), field(S.proxmox, "url", "API URL", {placeholder: "https://192.168.7.11:8006"}), field(S.proxmox, "token_id", "Token ID", {placeholder: "monitor@pve!nsm10"}), field(S.proxmox, "token_secret", "Token secret", pw), field(S.proxmox, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
+    $("section", {class: "card"}, $("h2", null, "Firewalla"), $("p", {class: "note"}, "Uses the Firewalla MSP API. Create a Read Only personal access token in the MSP portal under Settings, MSP API."),
+      $("div", {class: "form"}, field(S.firewalla, "enabled", "Enabled", {type: "checkbox"}), field(S.firewalla, "domain", "MSP domain", {placeholder: "mydomain.firewalla.net"}), field(S.firewalla, "token", "Personal access token", pw))),
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
       $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}))),
