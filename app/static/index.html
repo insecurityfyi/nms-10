@@ -285,6 +285,41 @@ function vSettings() {
   else api("/api/settings").then(s => { settings = s; renderSettings(); }).catch(e => { box.replaceChildren($("div", {class: "crit"}, e.message)); });
   return box;
 }
+async function saveSettings(note) {
+  try { settings = await api("/api/settings", "PUT", settings); saveMsg = "Saved. " + (note || "Polling with the new settings now."); setTimeout(() => refresh(false), 4000); }
+  catch (e) { saveMsg = e.message; }
+  renderSettings();
+}
+const disc = {cidr: "", version: "2c", community: "", v3_user: "", v3_auth_proto: "SHA", v3_auth_pass: "", v3_priv_proto: "AES", v3_priv_pass: "", busy: false, error: "", result: null, pick: {}};
+function discoveryEl() {
+  const S = settings, pw = {type: "password"}, known = new Set(S.snmp.devices.map(d => d.host));
+  const scan = async () => {
+    disc.busy = true; disc.error = ""; disc.result = null; renderSettings();
+    try { disc.result = await api("/api/discover", "POST", disc); disc.pick = {}; disc.result.found.forEach(f => { disc.pick[f.host] = !known.has(f.host); }); }
+    catch (e) { disc.error = e.message; }
+    disc.busy = false; renderSettings();
+  };
+  const add = () => {
+    const chosen = disc.result.found.filter(f => disc.pick[f.host] && !known.has(f.host));
+    chosen.forEach(f => S.snmp.devices.push({id: "", name: f.sys_name || f.host, host: f.host, version: disc.version, community: disc.community, v3_user: disc.v3_user, v3_auth_proto: disc.v3_auth_proto, v3_auth_pass: disc.v3_auth_pass, v3_priv_proto: disc.v3_priv_proto, v3_priv_pass: disc.v3_priv_pass, uplink_ifindex: ""}));
+    disc.result = null;
+    saveSettings("Added " + chosen.length + " device" + (chosen.length === 1 ? "" : "s") + " and started polling.");
+  };
+  const r = disc.result, picked = r ? r.found.filter(f => disc.pick[f.host] && !known.has(f.host)).length : 0;
+  return $("div", {class: "dev"}, $("strong", null, "Discover devices"),
+    $("p", {class: "note"}, "Scans an IPv4 range (up to 1024 addresses) and lists everything that answers SNMP with these credentials."),
+    $("div", {class: "form"}, field(disc, "cidr", "Range to scan", {placeholder: "192.168.7.0/24"}), field(disc, "version", "SNMP version", {options: ["2c", "3"], rerender: true}),
+      disc.version === "3" ? [field(disc, "v3_user", "v3 username"), field(disc, "v3_auth_proto", "Auth protocol", {options: ["SHA", "SHA-256", "SHA-512", "MD5"]}), field(disc, "v3_auth_pass", "Auth passphrase", pw), field(disc, "v3_priv_proto", "Privacy protocol", {options: ["AES", "AES-256", "DES"]}), field(disc, "v3_priv_pass", "Privacy passphrase", pw)]
+        : field(disc, "community", "Community string", pw)),
+    $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px"}, $("button", {type: "button", disabled: disc.busy, onclick: scan}, disc.busy ? "Scanning\u2026" : "Scan"),
+      $("span", {role: "status", class: disc.error ? "crit" : "mute"}, disc.error || (disc.busy ? "This can take up to 30 seconds." : r ? r.found.length + " of " + r.scanned + " addresses answered." : ""))),
+    r && r.found.length ? [$("div", {class: "scroll", style: "margin-top:12px"}, $("table", null,
+      $("thead", null, $("tr", null, ["Add", "Address", "Name", "Description"].map(h => $("th", null, h)))),
+      $("tbody", null, r.found.map(f => $("tr", null,
+        $("td", null, known.has(f.host) ? $("span", {class: "mute"}, "Already added") : $("input", {type: "checkbox", "aria-label": "Add " + f.host, checked: disc.pick[f.host], onchange: e => { disc.pick[f.host] = e.target.checked; renderSettings(); }})),
+        $("td", {class: "mono"}, f.host), $("td", {style: "font-weight:500"}, f.sys_name || dash), $("td", {class: "mute", style: "white-space:normal;min-width:240px"}, f.descr || dash)))))),
+      $("button", {class: "primary", type: "button", style: "margin-top:12px", disabled: picked === 0, onclick: add}, "Add " + picked + " selected device" + (picked === 1 ? "" : "s"))] : null);
+}
 function renderSettings() {
   const box = document.getElementById("settings"); if (!box || !settings) return;
   const S = settings, pw = {type: "password"};
@@ -298,7 +333,7 @@ function renderSettings() {
   box.replaceChildren(
     $("section", {class: "card"}, $("h2", null, "General"), $("div", {class: "form"}, field(S, "poll_interval", "Poll interval in seconds (15–3600)", {type: "number"}))),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "SNMP devices"), $("button", {type: "button", onclick: () => { S.snmp.devices.push({id: "", name: "", host: "", version: "2c", community: "", v3_user: "", v3_auth_proto: "SHA", v3_auth_pass: "", v3_priv_proto: "AES", v3_priv_pass: "", uplink_ifindex: ""}); renderSettings(); }}, "Add device")),
-      $("p", {class: "note"}, "Each device is polled for name, uptime and CPU load. Set an uplink ifIndex to also show traffic on that interface."), devs.length ? devs : $("div", {class: "empty"}, "No devices yet.")),
+      $("p", {class: "note"}, "Discover devices on a range, or add one by hand. Each device is polled for name, uptime and CPU load. Set an uplink ifIndex to also show traffic on that interface."), discoveryEl(), devs.length ? devs : $("div", {class: "empty"}, "No devices yet.")),
     $("section", {class: "card"}, $("h2", null, "Ubiquiti UniFi"), $("p", {class: "note"}, "Uses the UniFi Network Integration API. Create the key in UniFi Network under Settings, Control Plane, Integrations."),
       $("div", {class: "form"}, field(S.unifi, "enabled", "Enabled", {type: "checkbox"}), field(S.unifi, "url", "Console URL", {placeholder: "https://192.168.7.1"}), field(S.unifi, "api_key", "API key", pw), field(S.unifi, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
     $("section", {class: "card"}, $("h2", null, "Proxmox VE"), $("p", {class: "note"}, "Uses an API token. A token with the PVEAuditor role on / is enough for monitoring."),
@@ -306,12 +341,7 @@ function renderSettings() {
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. Leave cloud blank for the production cloud."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (optional)", {placeholder: "beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
       $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}))),
-    $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: async ev => {
-      ev.target.disabled = true;
-      try { settings = await api("/api/settings", "PUT", settings); saveMsg = "Saved. Polling with the new settings now."; setTimeout(() => refresh(false), 4000); }
-      catch (e) { saveMsg = e.message; }
-      renderSettings();
-    }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
+    $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }
 boot();

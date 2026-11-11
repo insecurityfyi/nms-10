@@ -1,7 +1,9 @@
 """Read-only collectors for SNMP, UniFi, Proxmox VE and Zscaler (OneAPI)."""
 import asyncio
 import hashlib
+import ipaddress
 import re
+import shutil
 import time
 
 import httpx
@@ -38,7 +40,7 @@ async def _run(args, timeout=10):
     return p.returncode, out.decode(errors="replace"), err.decode(errors="replace")
 
 
-def _snmp_args(dev):
+def _snmp_args(dev, timeout="2", retries="1"):
     if dev.get("version") == "3":
         a = ["-v3", "-u", dev.get("v3_user") or "nsm"]
         ap, pp = dev.get("v3_auth_pass"), dev.get("v3_priv_pass")
@@ -51,7 +53,7 @@ def _snmp_args(dev):
             a += ["-x", proto if proto in PRIV_PROTOS else "AES", "-X", pp]
     else:
         a = ["-v2c", "-c", dev.get("community") or "public"]
-    return a + ["-t", "2", "-r", "1", "-Oqvt"]
+    return a + ["-t", timeout, "-r", retries, "-Oqvt"]
 
 
 def _num(s):
@@ -111,6 +113,37 @@ async def collect_snmp(cfg, prev):
         async with sem:
             return await snmp_device(d, prev)
     return {"configured": True, "devices": list(await asyncio.gather(*(one(d) for d in devs)))}
+
+
+MAX_SCAN = 1024
+
+
+async def discover(cidr, cred):
+    """Probe every address in an IPv4 range with one SNMP GET; return the ones that answer."""
+    try:
+        net = ipaddress.ip_network(str(cidr).strip(), strict=False)
+    except ValueError:
+        raise ValueError("Enter a range like 192.168.7.0/24")
+    if net.version != 4:
+        raise ValueError("Only IPv4 ranges are supported")
+    if net.num_addresses > MAX_SCAN:
+        raise ValueError(f"Range too large: scan at most {MAX_SCAN} addresses (a /22) at a time")
+    if not shutil.which("snmpget"):
+        raise ValueError("net-snmp tools are not installed")
+    hosts = [str(h) for h in net.hosts()] or [str(net.network_address)]
+    auth = _snmp_args(cred, timeout="1", retries="0")
+    sem = asyncio.Semaphore(64)
+
+    async def probe(host):
+        async with sem:
+            rc, out, _ = await _run(["snmpget", *auth, host, "1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0"], timeout=4)
+        lines = out.strip().splitlines()
+        if rc != 0 or not lines:
+            return None
+        return {"host": host, "sys_name": lines[0].strip().strip('"'),
+                "descr": " ".join(x.strip() for x in lines[1:]).strip('"')[:160]}
+    found = [r for r in await asyncio.gather(*(probe(h) for h in hosts)) if r]
+    return {"scanned": len(hosts), "found": found}
 
 
 # ---- UniFi Network (official Integration API, X-API-KEY) -------------------

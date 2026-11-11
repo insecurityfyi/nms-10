@@ -184,6 +184,16 @@ async def put_settings(body: dict = Depends(json_body)):
     return store.masked(cfg)
 
 
+@app.post("/api/discover", dependencies=[Depends(authed)])
+async def discover(body: dict = Depends(json_body)):
+    cred = store._fill(store.SNMP_DEVICE, body)
+    cred["version"] = "3" if cred["version"] == "3" else "2c"
+    try:
+        return await collectors.discover(body.get("cidr") or "", cred)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/poll", dependencies=[Depends(authed)])
 def poll_now():
     _wake.set()
