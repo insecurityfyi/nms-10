@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NSM-10</title>
+<style>
+:root{--bg:#0D1117;--nav:#10151C;--card:#161B22;--inset:#10151C;--line:#262D38;--line2:#1F2630;--text:#E6EDF3;--mute:#9BA7B4;--soft:#B6C2CF;--accent:#58A6FF;--ok:#56D364;--warn:#F5B84A;--crit:#FF8E86}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--soft);text-decoration:none}a:hover{color:#fff}
+h1{margin:0;font-size:26px;font-weight:600}h2{margin:0;font-size:16px;font-weight:600}
+.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+.mute{color:var(--mute)}.ok{color:var(--ok)}.warn{color:var(--warn)}.crit{color:var(--crit)}
+.shell{display:flex;flex-wrap:wrap;min-height:100vh}
+nav{flex:1 1 220px;background:var(--nav);border-right:1px solid #222A35;padding:20px 14px;display:flex;flex-direction:column;gap:20px}
+.brand{font-size:19px;font-weight:600;padding:0 12px;letter-spacing:.2px}
+.group{display:flex;flex-direction:column;gap:2px}
+.group .label{padding:0 12px 6px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#8B98A8}
+nav a{display:flex;align-items:center;justify-content:space-between;min-height:44px;padding:0 12px;border-radius:8px}
+nav a.on{background:#1C2430;color:#fff;font-weight:600}
+.badge{font-size:12px;background:#3A2A12;color:var(--warn);padding:2px 8px;border-radius:10px}
+.host{margin-top:auto;padding:12px;border:1px solid #222A35;border-radius:8px;font-size:12px;color:var(--mute)}
+main{flex:999 1 560px;min-width:0;padding:24px 28px 40px;display:flex;flex-direction:column;gap:20px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px}
+header .grow{flex:1 1 240px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;color:var(--text);display:block}
+.tile .k{color:var(--mute);font-size:12px}.tile .v{font-size:26px;font-weight:600}.tile .v small{font-size:14px;color:var(--mute);font-weight:500}.tile .s{font-size:12px}
+.row{display:flex;flex-wrap:wrap;gap:20px}.row>.card{flex:1 1 340px}.row>.wide{flex:3 1 520px}
+.head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;font-weight:500;color:var(--mute);padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:10px 8px;border-bottom:1px solid var(--line2);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line2);font-size:13px}.kv:last-child{border-bottom:0}
+.grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.inset{background:var(--inset);border-radius:8px;padding:14px 16px}
+.bar{height:6px;background:#232B36;border-radius:3px;margin-top:4px}.bar>i{display:block;height:6px;border-radius:3px;background:var(--accent)}.bar>i.hot{background:var(--warn)}
+.node{display:grid;grid-template-columns:90px repeat(3,minmax(0,1fr));gap:14px;align-items:center;font-size:12px;margin-bottom:14px}
+.alert{padding:11px 0;border-bottom:1px solid var(--line2)}.alert:last-child{border-bottom:0}
+.alert .top{display:flex;justify-content:space-between;gap:10px;font-size:12px}
+button,.btn{min-height:44px;padding:0 14px;background:#1C2430;border:1px solid #2A323E;border-radius:8px;color:var(--text);font:inherit;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#06121F;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+input,select{min-height:44px;width:100%;padding:0 10px;background:#0D1117;border:1px solid #2A323E;border-radius:8px;color:var(--text);font:inherit}
+input[type=checkbox]{width:20px;min-height:20px;height:20px;accent-color:var(--accent)}
+label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute)}
+label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-size:14px;color:var(--text)}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+.dev{border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:12px}
+.note{font-size:13px;color:var(--mute);margin:6px 0 0}
+.center{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.center .card{width:100%;max-width:380px;display:flex;flex-direction:column;gap:14px}
+.empty{color:var(--mute);padding:14px 0}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+const app = document.getElementById("app");
+let state = null, settings = null, view = "overview", timer = null, saveMsg = "";
+
+function $(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "value") e.value = v;
+    else if (k === "checked") e.checked = !!v;
+    else if (v === true) e.setAttribute(k, "");
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return e;
+}
+async function api(path, method, body) {
+  const r = await fetch(path, {method: method || "GET", headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined});
+  if (r.status === 401 && path !== "/api/login") { stop(); boot(); throw new Error("Sign in required"); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ("Request failed (" + r.status + ")"));
+  return data;
+}
+const dash = "—";
+const pct = (a, b) => (a != null && b) ? Math.round(100 * a / b) : null;
+function bps(n) { if (n == null) return dash; const u = ["bps", "kbps", "Mbps", "Gbps"]; let i = 0; while (n >= 1000 && i < 3) { n /= 1000; i++; } return (n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i]; }
+function dur(s) { if (s == null) return dash; if (s >= 86400) return Math.floor(s / 86400) + "d"; if (s >= 3600) return Math.floor(s / 3600) + "h"; return Math.max(1, Math.floor(s / 60)) + "m"; }
+function gib(n) { return n == null ? dash : (n / 1073741824).toFixed(n >= 107374182400 ? 0 : 1) + " GiB"; }
+const ago = t => t ? dur(Date.now() / 1000 - t) : dash;
+const src = n => (state && state.sources[n]) || {};
+const kv = (k, v, cls) => $("div", {class: "kv"}, $("span", {class: "mute"}, k), $("span", {class: "mono " + (cls || "")}, v == null ? dash : v));
+
+/* ---------- sign-in ---------- */
+async function boot() {
+  let s;
+  try { s = await (await fetch("/api/session")).json(); } catch (e) { app.replaceChildren($("div", {class: "center"}, "Cannot reach the NSM-10 server.")); return; }
+  if (s.authed) return start();
+  const setup = s.setup_needed, msg = $("div", {class: "crit", role: "alert"});
+  const pw = $("input", {type: "password", id: "pw", autocomplete: setup ? "new-password" : "current-password", required: true});
+  const form = $("form", {class: "card", onsubmit: async ev => {
+    ev.preventDefault(); msg.textContent = "";
+    try { await api(setup ? "/api/setup" : "/api/login", "POST", {password: pw.value}); start(); }
+    catch (e) { msg.textContent = e.message; }
+  }},
+    $("h1", null, "NSM-10"),
+    $("div", {class: "mute"}, setup ? "First run: choose an admin password (10 characters or more)." : "Sign in to continue."),
+    $("label", {for: "pw"}, setup ? "New admin password" : "Admin password", pw),
+    msg, $("button", {class: "primary", type: "submit"}, setup ? "Create admin and continue" : "Sign in"));
+  app.replaceChildren($("div", {class: "center"}, form));
+  pw.focus();
+}
+function stop() { clearInterval(timer); timer = null; }
+async function start() {
+  view = (location.hash || "#overview").slice(1);
+  await refresh(true);
+  stop(); timer = setInterval(() => refresh(false), 10000);
+}
+window.addEventListener("hashchange", () => { view = (location.hash || "#overview").slice(1); settings = view === "settings" ? null : settings; render(); });
+async function refresh(force) {
+  try { state = await api("/api/state"); } catch (e) { return; }
+  if (force || view !== "settings") render(); else renderNav();
+}
+
+/* ---------- layout ---------- */
+const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"]]],
+  ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"]]],
+  ["Zscaler", [["zscaler", "ZIA · ZPA · ZDX · AI Security"]]],
+  ["Admin", [["settings", "Settings & credentials"]]]];
+function navEl() {
+  const n = state ? state.alerts.length : 0;
+  return $("nav", {"aria-label": "Main", id: "nav"}, $("div", {class: "brand"}, "NSM-10"),
+    NAV.map(([label, items]) => $("div", {class: "group"}, label && $("div", {class: "label"}, label),
+      items.map(([id, text]) => $("a", {href: "#" + id, class: view === id ? "on" : "", "aria-current": view === id ? "page" : null},
+        text, id === "alerts" && n > 0 && $("span", {class: "badge"}, n))))),
+    $("div", {class: "host"}, $("div", null, "Signed in as admin"),
+      $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
+}
+function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
+const TITLES = {overview: "Overview", alerts: "Alerts", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", zscaler: "Zscaler", settings: "Settings & credentials"};
+function render() {
+  if (!state) return;
+  if (!TITLES[view]) view = "overview";
+  const body = {overview: vOverview, alerts: vAlerts, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, zscaler: vZscaler, settings: vSettings}[view]();
+  const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
+  app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
+    $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
+      $("button", {type: "button", onclick: async () => { await api("/api/poll", "POST", {}); setTimeout(() => refresh(false), 3000); }}, "Poll now")),
+    body)));
+}
+function notReady(name, label) {
+  const s = src(name);
+  if (!s.configured) return $("div", {class: "empty"}, label + " is not set up yet. ", $("a", {href: "#settings", style: "color:var(--accent)"}, "Open settings"));
+  if (s.ok === false) return $("div", {class: "warn", role: "status"}, "▲ " + (s.error || "Could not be polled"));
+  return null;
+}
+
+/* ---------- views ---------- */
+function tile(href, k, v, unit, sub, cls) {
+  return $("a", {class: "tile", href: href}, $("div", {class: "k"}, k), $("div", {class: "v"}, v, unit && $("small", null, " " + unit)), $("div", {class: "s " + (cls || "mute")}, sub));
+}
+function srcTile(name, href, label, build) {
+  const s = src(name);
+  if (!s.configured) return tile(href, label, dash, "", "Not set up");
+  if (s.ok === false) return tile(href, label, dash, "", "▲ Poll failed", "warn");
+  return build(s);
+}
+function vOverview() {
+  const sn = src("snmp"), devs = sn.devices || [], up = devs.filter(d => d.up).length;
+  const tiles = $("section", {class: "tiles", "aria-label": "Source health"},
+    !sn.configured ? tile("#snmp", "SNMP devices", dash, "", "Not set up")
+      : tile("#snmp", "SNMP devices", up, "/ " + devs.length + " up", up === devs.length ? "● All responding" : "✕ " + (devs.length - up) + " down", up === devs.length ? "ok" : "crit"),
+    srcTile("unifi", "#unifi", "UniFi", s => tile("#unifi", "UniFi", s.clients.total, "clients", (s.counts.online === s.counts.total ? "● " : "▲ ") + s.counts.online + " of " + s.counts.total + " devices online", s.counts.online === s.counts.total ? "ok" : "warn")),
+    srcTile("proxmox", "#proxmox", "Proxmox VE", s => { const on = s.nodes.filter(n => n.online).length; return tile("#proxmox", "Proxmox VE", s.guests.length, "guests", (on === s.nodes.length ? "● " : "✕ ") + on + " of " + s.nodes.length + " nodes online", on === s.nodes.length ? "ok" : "crit"); }),
+    srcTile("zia", "#zscaler", "ZIA", s => tile("#zscaler", "ZIA", s.url_rules == null ? dash : s.url_rules, "URL rules", s.status === "ACTIVE" ? "● Config active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn")),
+    srcTile("zpa", "#zscaler", "ZPA", s => { const h = s.connectors.filter(c => c.healthy).length; return tile("#zscaler", "ZPA", s.segments == null ? dash : s.segments, "app segments", (h === s.connectors.length ? "● " : "▲ ") + h + " of " + s.connectors.length + " connectors healthy", h === s.connectors.length ? "ok" : "warn"); }),
+    srcTile("zdx", "#zscaler", "ZDX score", s => tile("#zscaler", "ZDX score", s.score == null ? dash : s.score, "/ 100", s.score == null ? "No scored apps" : s.score >= 66 ? "● Good" : s.score >= 34 ? "▲ Okay" : "✕ Poor", s.score == null ? "mute" : s.score >= 66 ? "ok" : s.score >= 34 ? "warn" : "crit")),
+    srcTile("aiguard", "#zscaler", "AI Security", s => tile("#zscaler", "AI Security", s.policies, "policies", (s.applications == null ? dash : s.applications) + " LLM applications")));
+  return [tiles,
+    $("div", {class: "row"},
+      $("section", {class: "card wide"}, $("div", {class: "head"}, $("h2", null, "Network devices"), $("a", {href: "#snmp", style: "color:var(--accent)"}, "View all")), snmpTable(devs.slice(0, 8))),
+      $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Active alerts"), $("a", {href: "#alerts", style: "color:var(--accent)"}, "Open alerts")), alertList(state.alerts.slice(0, 6)))),
+    $("div", {class: "row"},
+      $("section", {class: "card wide"}, $("div", {class: "head"}, $("h2", null, "Proxmox cluster")), notReady("proxmox", "Proxmox") || nodeBars()),
+      $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Ubiquiti UniFi")), notReady("unifi", "UniFi") || unifiSummary())),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Zscaler")), zsPanels())];
+}
+function alertList(list) {
+  if (!list.length) return $("div", {class: "empty"}, "No active alerts.");
+  return $("div", null, list.map(a => $("div", {class: "alert"},
+    $("div", {class: "top"}, $("span", {class: a.severity === "critical" ? "crit" : "warn", style: "font-weight:600"}, (a.severity === "critical" ? "✕ CRITICAL" : "▲ WARNING") + " · " + a.source.toUpperCase()), $("span", {class: "mute"}, ago(a.since))),
+    $("div", null, a.message))));
+}
+const vAlerts = () => $("section", {class: "card"}, alertList(state.alerts));
+function snmpTable(devs) {
+  if (!src("snmp").configured) return notReady("snmp", "SNMP");
+  return $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Device", "Address", "Status", "CPU", "Uplink in / out", "Uptime"].map(h => $("th", null, h)))),
+    $("tbody", null, devs.map(d => $("tr", null,
+      $("td", {style: "font-weight:500"}, d.name, d.sys_name && d.sys_name !== d.name ? $("span", {class: "mute"}, " (" + d.sys_name + ")") : null),
+      $("td", {class: "mono mute"}, d.host),
+      $("td", {class: d.up ? (d.cpu >= 90 ? "warn" : "ok") : "crit"}, d.up ? (d.cpu >= 90 ? "▲ High CPU" : "● Up") : "✕ " + (d.error || "No response")),
+      $("td", {class: "mono"}, d.cpu == null ? dash : d.cpu + "%"),
+      $("td", {class: "mono"}, d.in_bps == null ? dash : bps(d.in_bps) + " / " + bps(d.out_bps)),
+      $("td", {class: "mono mute"}, dur(d.uptime_s)))))));
+}
+const vSnmp = () => $("section", {class: "card"}, snmpTable(src("snmp").devices || []));
+function meter(label, p) {
+  const hot = p != null && p >= 85;
+  return $("div", null, $("div", {style: "display:flex;justify-content:space-between", class: hot ? "warn" : "mute"}, $("span", null, (hot ? "▲ " : "") + label), $("span", {class: "mono", style: hot ? "" : "color:var(--text)"}, p == null ? dash : p + "%")),
+    $("div", {class: "bar"}, $("i", {class: hot ? "hot" : "", style: "width:" + Math.min(100, p || 0) + "%"})));
+}
+function nodeBars() {
+  const s = src("proxmox");
+  return $("div", null, s.nodes.map(n => $("div", {class: "node"},
+    $("div", {style: "font-size:14px;font-weight:500"}, n.name, !n.online && $("div", {class: "crit", style: "font-size:12px"}, "✕ Offline")),
+    meter("CPU", n.cpu == null ? null : Math.round(n.cpu * 100)), meter("RAM", pct(n.mem, n.maxmem)), meter("Root disk", pct(n.disk, n.maxdisk)))));
+}
+function vProxmox() {
+  const bad = notReady("proxmox", "Proxmox"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("proxmox");
+  return [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Nodes" + (s.cluster ? " · " + s.cluster : "")), s.quorate != null && $("span", {class: s.quorate ? "ok" : "crit"}, s.quorate ? "● Quorate" : "✕ No quorum")), nodeBars()),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Guests")), $("div", {class: "scroll"}, $("table", null,
+      $("thead", null, $("tr", null, ["ID", "Name", "Type", "Node", "Status", "CPU", "Memory"].map(h => $("th", null, h)))),
+      $("tbody", null, s.guests.map(g => $("tr", null, $("td", {class: "mono"}, g.vmid), $("td", {style: "font-weight:500"}, g.name), $("td", null, g.type), $("td", null, g.node),
+        $("td", {class: g.status === "running" ? "ok" : "mute"}, (g.status === "running" ? "● " : "○ ") + g.status),
+        $("td", {class: "mono"}, g.status === "running" && g.cpu != null ? Math.round(g.cpu * 100) + "%" : dash),
+        $("td", {class: "mono"}, g.status === "running" ? gib(g.mem) + " / " + gib(g.maxmem) : gib(g.maxmem)))))))),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Storage")), $("div", {class: "scroll"}, $("table", null,
+      $("thead", null, $("tr", null, ["Storage", "Node", "Used", "Total", "Usage"].map(h => $("th", null, h)))),
+      $("tbody", null, s.storage.map(x => { const p = pct(x.used, x.total); return $("tr", null, $("td", {style: "font-weight:500"}, x.name), $("td", null, x.shared ? "shared" : x.node), $("td", {class: "mono"}, gib(x.used)), $("td", {class: "mono"}, gib(x.total)), $("td", {class: "mono " + (p >= 85 ? "warn" : "")}, p == null ? dash : (p >= 85 ? "▲ " : "") + p + "%")); })))))];
+}
+function unifiSummary() {
+  const s = src("unifi");
+  return $("div", null, kv("Access points", s.counts.ap), kv("Switches", s.counts.switch), kv("Gateways", s.counts.gateway),
+    kv("Wi-Fi clients", s.clients.wireless), kv("Wired clients", s.clients.wired),
+    kv("Firmware updates", s.counts.updates ? "▲ " + s.counts.updates + " available" : "None", s.counts.updates ? "warn" : ""));
+}
+function vUnifi() {
+  const bad = notReady("unifi", "UniFi"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("unifi"), kinds = {ap: "Access point", switch: "Switch", gateway: "Gateway", other: "Other"};
+  return [$("section", {class: "card"}, unifiSummary()),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Devices")), $("div", {class: "scroll"}, $("table", null,
+      $("thead", null, $("tr", null, ["Device", "Type", "Model", "Address", "Site", "Status"].map(h => $("th", null, h)))),
+      $("tbody", null, s.devices.map(d => $("tr", null, $("td", {style: "font-weight:500"}, d.name), $("td", null, kinds[d.kind]), $("td", null, d.model), $("td", {class: "mono mute"}, d.ip || dash), $("td", null, d.site),
+        $("td", {class: d.state === "ONLINE" ? "ok" : "crit"}, (d.state === "ONLINE" ? "● " : "✕ ") + (d.state || "UNKNOWN").toLowerCase())))))))];
+}
+function zsPanel(name, title, build) {
+  const s = src(name), bad = notReady(name, "This product");
+  return $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, title), bad || build(s));
+}
+function zsPanels() {
+  return $("div", {class: "grid4"},
+    zsPanel("zia", "ZIA · Internet Access", s => [kv("Configuration", s.status === "ACTIVE" ? "Active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn"), kv("URL filtering rules", s.url_rules), kv("Firewall rules", s.fw_rules), kv("Locations", s.locations)]),
+    zsPanel("zpa", "ZPA · Private Access", s => { const h = s.connectors.filter(c => c.healthy).length; return [kv("App Connectors", (h === s.connectors.length ? "" : "▲ ") + h + " of " + s.connectors.length + " healthy", h === s.connectors.length ? "" : "warn"), kv("App segments", s.segments)]; }),
+    zsPanel("zdx", "ZDX · Digital Experience", s => [kv("Average app score", s.score == null ? null : s.score + " / 100"), kv("Monitored apps", s.apps.length), kv("Ongoing alerts", s.alerts)]),
+    zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
+}
+function vZscaler() {
+  const out = [$("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
+  if (zpa.ok && zpa.connectors.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZPA App Connectors")), $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Connector", "Status", "Version"].map(h => $("th", null, h)))),
+    $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", {class: "mono mute"}, c.version || dash))))))));
+  if (zdx.ok && zdx.apps.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZDX application scores")), $("div", {class: "scroll"}, $("table", null,
+    $("thead", null, $("tr", null, ["Application", "Score", "Users"].map(h => $("th", null, h)))),
+    $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
+  if (ai.ok && ai.policy_names.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))));
+  return out;
+}
+
+/* ---------- settings ---------- */
+let fid = 0;
+function field(obj, key, label, opts) {
+  opts = opts || {}; const id = "f" + (++fid);
+  if (opts.type === "checkbox") return $("label", {class: "check", for: id}, $("input", {type: "checkbox", id: id, checked: obj[key], onchange: e => { obj[key] = e.target.checked; }}), label);
+  if (opts.options) return $("label", {for: id}, label, $("select", {id: id, onchange: e => { obj[key] = e.target.value; if (opts.rerender) renderSettings(); }}, opts.options.map(o => $("option", {value: o, selected: obj[key] === o}, o))));
+  return $("label", {for: id}, label, $("input", {id: id, type: opts.type || "text", value: obj[key] == null ? "" : obj[key], placeholder: opts.placeholder || "", autocomplete: opts.type === "password" ? "new-password" : "off", spellcheck: "false", oninput: e => { obj[key] = e.target.value; }}));
+}
+function vSettings() {
+  const box = $("div", {id: "settings", style: "display:flex;flex-direction:column;gap:20px"}, $("div", {class: "mute"}, "Loading settings…"));
+  if (settings) setTimeout(renderSettings, 0);
+  else api("/api/settings").then(s => { settings = s; renderSettings(); }).catch(e => { box.replaceChildren($("div", {class: "crit"}, e.message)); });
+  return box;
+}
+function renderSettings() {
+  const box = document.getElementById("settings"); if (!box || !settings) return;
+  const S = settings, pw = {type: "password"};
+  const devs = S.snmp.devices.map((d, i) => $("div", {class: "dev"},
+    $("div", {class: "head", style: "margin:0"}, $("strong", null, d.name || d.host || "New device"), $("button", {type: "button", onclick: () => { S.snmp.devices.splice(i, 1); renderSettings(); }}, "Remove")),
+    $("div", {class: "form"}, field(d, "name", "Display name"), field(d, "host", "IP address or hostname", {placeholder: "192.168.7.2"}), field(d, "version", "SNMP version", {options: ["2c", "3"], rerender: true}),
+      d.version === "3" ? [field(d, "v3_user", "v3 username"), field(d, "v3_auth_proto", "Auth protocol", {options: ["SHA", "SHA-256", "SHA-512", "MD5"]}), field(d, "v3_auth_pass", "Auth passphrase", pw), field(d, "v3_priv_proto", "Privacy protocol", {options: ["AES", "AES-256", "DES"]}), field(d, "v3_priv_pass", "Privacy passphrase", pw)]
+        : field(d, "community", "Community string", pw),
+      field(d, "uplink_ifindex", "Uplink ifIndex (optional)", {placeholder: "e.g. 1"}))));
+  const msg = $("span", {role: "status", class: saveMsg.startsWith("Saved") ? "ok" : "crit"}, saveMsg);
+  box.replaceChildren(
+    $("section", {class: "card"}, $("h2", null, "General"), $("div", {class: "form"}, field(S, "poll_interval", "Poll interval in seconds (15–3600)", {type: "number"}))),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "SNMP devices"), $("button", {type: "button", onclick: () => { S.snmp.devices.push({id: "", name: "", host: "", version: "2c", community: "", v3_user: "", v3_auth_proto: "SHA", v3_auth_pass: "", v3_priv_proto: "AES", v3_priv_pass: "", uplink_ifindex: ""}); renderSettings(); }}, "Add device")),
+      $("p", {class: "note"}, "Each device is polled for name, uptime and CPU load. Set an uplink ifIndex to also show traffic on that interface."), devs.length ? devs : $("div", {class: "empty"}, "No devices yet.")),
+    $("section", {class: "card"}, $("h2", null, "Ubiquiti UniFi"), $("p", {class: "note"}, "Uses the UniFi Network Integration API. Create the key in UniFi Network under Settings, Control Plane, Integrations."),
+      $("div", {class: "form"}, field(S.unifi, "enabled", "Enabled", {type: "checkbox"}), field(S.unifi, "url", "Console URL", {placeholder: "https://192.168.7.1"}), field(S.unifi, "api_key", "API key", pw), field(S.unifi, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
+    $("section", {class: "card"}, $("h2", null, "Proxmox VE"), $("p", {class: "note"}, "Uses an API token. A token with the PVEAuditor role on / is enough for monitoring."),
+      $("div", {class: "form"}, field(S.proxmox, "enabled", "Enabled", {type: "checkbox"}), field(S.proxmox, "url", "API URL", {placeholder: "https://192.168.7.11:8006"}), field(S.proxmox, "token_id", "Token ID", {placeholder: "monitor@pve!nsm10"}), field(S.proxmox, "token_secret", "Token secret", pw), field(S.proxmox, "verify_tls", "Verify TLS certificate", {type: "checkbox"}))),
+    $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. Leave cloud blank for the production cloud."),
+      $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (optional)", {placeholder: "beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
+      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}))),
+    $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: async ev => {
+      ev.target.disabled = true;
+      try { settings = await api("/api/settings", "PUT", settings); saveMsg = "Saved. Polling with the new settings now."; setTimeout(() => refresh(false), 4000); }
+      catch (e) { saveMsg = e.message; }
+      renderSettings();
+    }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
+  saveMsg = "";
+}
+boot();
+</script>
+</body>
+</html>

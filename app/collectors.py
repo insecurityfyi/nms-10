@@ -1,0 +1,361 @@
+"""Read-only collectors for SNMP, UniFi, Proxmox VE and Zscaler (OneAPI)."""
+import asyncio
+import hashlib
+import re
+import time
+
+import httpx
+
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-:]*$")
+LABEL_RE = re.compile(r"^[A-Za-z0-9-]*$")
+AUTH_PROTOS = {"MD5", "SHA", "SHA-224", "SHA-256", "SHA-384", "SHA-512"}
+PRIV_PROTOS = {"DES", "AES", "AES-192", "AES-256"}
+TIMEOUT = httpx.Timeout(15.0, connect=6.0)
+
+
+def _err(e):
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"HTTP {e.response.status_code} from {e.request.url.host}{e.request.url.path}"
+    if isinstance(e, httpx.HTTPError):
+        return f"{type(e).__name__}: {e}"[:200] or type(e).__name__
+    return f"{type(e).__name__}: {e}"[:200]
+
+
+# ---- SNMP (net-snmp command line tools) ------------------------------------
+
+async def _run(args, timeout=10):
+    try:
+        p = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except FileNotFoundError:
+        return 127, "", "net-snmp tools are not installed"
+    try:
+        out, err = await asyncio.wait_for(p.communicate(), timeout)
+    except asyncio.TimeoutError:
+        p.kill()
+        await p.wait()
+        return 1, "", "Timeout: no response"
+    return p.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _snmp_args(dev):
+    if dev.get("version") == "3":
+        a = ["-v3", "-u", dev.get("v3_user") or "nsm"]
+        ap, pp = dev.get("v3_auth_pass"), dev.get("v3_priv_pass")
+        a += ["-l", "authPriv" if ap and pp else "authNoPriv" if ap else "noAuthNoPriv"]
+        if ap:
+            proto = dev.get("v3_auth_proto", "SHA").upper()
+            a += ["-a", proto if proto in AUTH_PROTOS else "SHA", "-A", ap]
+        if ap and pp:
+            proto = dev.get("v3_priv_proto", "AES").upper()
+            a += ["-x", proto if proto in PRIV_PROTOS else "AES", "-X", pp]
+    else:
+        a = ["-v2c", "-c", dev.get("community") or "public"]
+    return a + ["-t", "2", "-r", "1", "-Oqvt"]
+
+
+def _num(s):
+    try:
+        return int(s.strip().strip('"'))
+    except (ValueError, AttributeError):
+        return None
+
+
+async def snmp_device(dev, prev):
+    res = {"id": dev["id"], "name": dev["name"], "host": dev["host"], "up": False, "sys_name": "",
+           "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None, "error": ""}
+    host = dev["host"]
+    if not HOST_RE.match(host):
+        res["error"] = "Invalid host"
+        return res
+    auth = _snmp_args(dev)
+    rc, out, err = await _run(["snmpget", *auth, host, "1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.3.0"])
+    lines = out.strip().splitlines()
+    if rc != 0 or len(lines) < 2:
+        msg = (err.strip().splitlines() or ["No response"])[-1]
+        res["error"] = "No response" if "Timeout" in msg else msg[:160]
+        return res
+    res["up"] = True
+    res["sys_name"] = lines[0].strip().strip('"')
+    ticks = _num(lines[1])
+    res["uptime_s"] = ticks // 100 if ticks is not None else None
+
+    rc, out, _ = await _run(["snmpwalk", *auth, host, "1.3.6.1.2.1.25.3.3.1.2"])
+    loads = [n for n in (_num(x) for x in out.splitlines()) if n is not None] if rc == 0 else []
+    if loads:
+        res["cpu"] = round(sum(loads) / len(loads))
+
+    idx = str(dev.get("uplink_ifindex") or "").strip()
+    if idx.isdigit():
+        rc, out, _ = await _run(["snmpget", *auth, host,
+                                 f"1.3.6.1.2.1.31.1.1.1.6.{idx}", f"1.3.6.1.2.1.31.1.1.1.10.{idx}"])
+        vals = [_num(x) for x in out.splitlines()]
+        if rc == 0 and len(vals) == 2 and None not in vals:
+            now = time.time()
+            p = prev.get(dev["id"])
+            if p and now > p[0] and vals[0] >= p[1] and vals[1] >= p[2]:
+                dt = now - p[0]
+                res["in_bps"] = round((vals[0] - p[1]) * 8 / dt)
+                res["out_bps"] = round((vals[1] - p[2]) * 8 / dt)
+            prev[dev["id"]] = (now, vals[0], vals[1])
+    return res
+
+
+async def collect_snmp(cfg, prev):
+    devs = cfg["snmp"]["devices"]
+    if not devs:
+        return {"configured": False, "devices": []}
+    sem = asyncio.Semaphore(20)
+
+    async def one(d):
+        async with sem:
+            return await snmp_device(d, prev)
+    return {"configured": True, "devices": list(await asyncio.gather(*(one(d) for d in devs)))}
+
+
+# ---- UniFi Network (official Integration API, X-API-KEY) -------------------
+
+async def _paged(client, url, headers):
+    items, offset = [], 0
+    while True:
+        r = await client.get(url, headers=headers, params={"offset": offset, "limit": 200})
+        r.raise_for_status()
+        body = r.json()
+        data = body.get("data", [])
+        items += data
+        offset += len(data)
+        if not data or offset >= body.get("totalCount", 0) or offset > 20000:
+            return items
+
+
+def _unifi_kind(d):
+    feats = d.get("features") or []
+    feats = " ".join(feats.keys() if isinstance(feats, dict) else [str(f) for f in feats]).lower()
+    if "accesspoint" in feats:
+        return "ap"
+    if "gateway" in feats:
+        return "gateway"
+    if "switching" in feats:
+        return "switch"
+    return "other"
+
+
+async def collect_unifi(cfg):
+    u = cfg["unifi"]
+    if not (u["enabled"] and u["url"] and u["api_key"]):
+        return {"configured": False}
+    if not u["url"].startswith(("https://", "http://")):
+        return {"configured": True, "ok": False, "error": "URL must start with https://"}
+    base = u["url"].rstrip("/") + "/proxy/network/integration/v1"
+    headers = {"X-API-KEY": u["api_key"], "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(verify=u["verify_tls"], timeout=TIMEOUT) as c:
+            sites = await _paged(c, base + "/sites", headers)
+            devices, clients = [], {"wired": 0, "wireless": 0, "other": 0}
+            for s in sites:
+                sid, sname = s.get("id"), s.get("name") or s.get("internalReference") or ""
+                for d in await _paged(c, f"{base}/sites/{sid}/devices", headers):
+                    devices.append({
+                        "name": d.get("name") or d.get("model") or "", "model": d.get("model") or "",
+                        "ip": d.get("ipAddress") or "", "state": str(d.get("state") or "").upper(),
+                        "site": sname, "kind": _unifi_kind(d),
+                        "update": bool(d.get("firmwareUpdatable")),
+                    })
+                for cl in await _paged(c, f"{base}/sites/{sid}/clients", headers):
+                    t = str(cl.get("type") or "").upper()
+                    clients["wired" if t == "WIRED" else "wireless" if t == "WIRELESS" else "other"] += 1
+        counts = {k: sum(1 for d in devices if d["kind"] == k) for k in ("ap", "switch", "gateway", "other")}
+        counts["total"] = len(devices)
+        counts["online"] = sum(1 for d in devices if d["state"] == "ONLINE")
+        counts["updates"] = sum(1 for d in devices if d["update"])
+        clients["total"] = sum(clients.values())
+        return {"configured": True, "ok": True, "error": "", "sites": len(sites),
+                "devices": devices, "counts": counts, "clients": clients}
+    except Exception as e:  # noqa: BLE001 - report any failure on the card
+        return {"configured": True, "ok": False, "error": _err(e)}
+
+
+# ---- Proxmox VE (API token) -------------------------------------------------
+
+async def collect_proxmox(cfg):
+    p = cfg["proxmox"]
+    if not (p["enabled"] and p["url"] and p["token_id"] and p["token_secret"]):
+        return {"configured": False}
+    if not p["url"].startswith(("https://", "http://")):
+        return {"configured": True, "ok": False, "error": "URL must start with https://"}
+    base = p["url"].rstrip("/") + "/api2/json"
+    headers = {"Authorization": f"PVEAPIToken={p['token_id']}={p['token_secret']}"}
+    try:
+        async with httpx.AsyncClient(verify=p["verify_tls"], timeout=TIMEOUT) as c:
+            r = await c.get(base + "/cluster/resources", headers=headers)
+            r.raise_for_status()
+            resources = r.json().get("data", [])
+            r = await c.get(base + "/cluster/status", headers=headers)
+            r.raise_for_status()
+            status = r.json().get("data", [])
+        cluster = next((s for s in status if s.get("type") == "cluster"), None)
+        nodes, guests, storage = [], [], []
+        for x in resources:
+            t = x.get("type")
+            if t == "node":
+                nodes.append({"name": x.get("node"), "online": x.get("status") == "online",
+                              "cpu": x.get("cpu"), "mem": x.get("mem"), "maxmem": x.get("maxmem"),
+                              "disk": x.get("disk"), "maxdisk": x.get("maxdisk"), "uptime": x.get("uptime")})
+            elif t in ("qemu", "lxc") and not x.get("template"):
+                guests.append({"vmid": x.get("vmid"), "name": x.get("name") or str(x.get("vmid")),
+                               "type": "VM" if t == "qemu" else "CT", "node": x.get("node"),
+                               "status": x.get("status"), "cpu": x.get("cpu"),
+                               "mem": x.get("mem"), "maxmem": x.get("maxmem")})
+            elif t == "storage":
+                storage.append({"name": x.get("storage"), "node": x.get("node"),
+                                "used": x.get("disk"), "total": x.get("maxdisk"),
+                                "shared": bool(x.get("shared"))})
+        nodes.sort(key=lambda n: n["name"] or "")
+        guests.sort(key=lambda g: g["vmid"] or 0)
+        return {"configured": True, "ok": True, "error": "",
+                "cluster": cluster.get("name") if cluster else "",
+                "quorate": bool(cluster.get("quorate")) if cluster else None,
+                "nodes": nodes, "guests": guests, "storage": storage}
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "ok": False, "error": _err(e)}
+
+
+# ---- Zscaler OneAPI (ZIdentity client credentials) --------------------------
+
+_tokens = {}
+
+
+async def _zs_token(client, z):
+    cloud = z["cloud"]
+    key = (z["vanity"], cloud, z["client_id"], hashlib.sha256(z["client_secret"].encode()).hexdigest())
+    tok = _tokens.get(key)
+    if tok and tok[1] > time.time() + 60:
+        return tok[0]
+    r = await client.post(
+        f"https://{z['vanity']}.zslogin{cloud}.net/oauth2/v1/token",
+        data={"grant_type": "client_credentials", "client_id": z["client_id"],
+              "client_secret": z["client_secret"], "audience": "https://api.zscaler.com"})
+    r.raise_for_status()
+    body = r.json()
+    _tokens.clear()
+    _tokens[key] = (body["access_token"], time.time() + int(body.get("expires_in", 3600)))
+    return body["access_token"]
+
+
+async def _zs_get(client, url, token, params=None):
+    r = await client.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                         params=params)
+    r.raise_for_status()
+    return r.json()
+
+
+def _as_list(body, *keys):
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for k in keys + ("list", "data", "items", "results"):
+            if isinstance(body.get(k), list):
+                return body[k]
+    return []
+
+
+async def _zia(c, base, tok):
+    status = await _zs_get(c, f"{base}/zia/api/v1/status", tok)
+    out = {"status": str(status.get("status", "")).upper(), "url_rules": None, "fw_rules": None, "locations": None}
+    for key, path in (("url_rules", "urlFilteringRules"), ("fw_rules", "firewallFilteringRules"),
+                      ("locations", "locations")):
+        try:
+            out[key] = len(_as_list(await _zs_get(c, f"{base}/zia/api/v1/{path}", tok)))
+        except httpx.HTTPError:
+            pass  # the API role may not include this resource
+    return out
+
+
+async def _zpa(c, base, tok, customer):
+    if not customer:
+        raise ValueError("ZPA customer ID is not set")
+    root = f"{base}/zpa/mgmtconfig/v1/admin/customers/{customer}"
+    conns = _as_list(await _zs_get(c, f"{root}/connector", tok, {"page": 1, "pagesize": 500}))
+    out = {"connectors": [], "segments": None}
+    for x in conns:
+        st = str(x.get("controlChannelStatus") or "")
+        out["connectors"].append({
+            "name": x.get("name") or "", "enabled": bool(x.get("enabled", True)),
+            "status": st.replace("ZPN_STATUS_", "").replace("_", " ").title() or "Unknown",
+            "healthy": bool(x.get("enabled", True)) and st.endswith("AUTHENTICATED"),
+            "version": x.get("currentVersion") or ""})
+    try:
+        body = await _zs_get(c, f"{root}/application", tok, {"page": 1, "pagesize": 500})
+        total = body.get("totalCount") if isinstance(body, dict) else None
+        out["segments"] = int(total) if str(total or "").isdigit() else len(_as_list(body))
+    except httpx.HTTPError:
+        pass
+    return out
+
+
+async def _zdx(c, base, tok):
+    apps = []
+    for a in _as_list(await _zs_get(c, f"{base}/zdx/v1/apps", tok), "apps"):
+        score = a.get("score")
+        apps.append({"name": a.get("name") or "", "users": a.get("total_users"),
+                     "score": round(score) if isinstance(score, (int, float)) and score >= 0 else None})
+    scored = [a["score"] for a in apps if a["score"] is not None]
+    out = {"apps": apps, "score": round(sum(scored) / len(scored)) if scored else None, "alerts": None}
+    try:
+        out["alerts"] = len(_as_list(await _zs_get(c, f"{base}/zdx/v1/alerts/ongoing", tok), "alerts"))
+    except httpx.HTTPError:
+        pass
+    return out
+
+
+async def _aiguard(c, base, tok):
+    root = f"{base}/aiguard/v1"
+    out = {"policies": None, "providers": None, "applications": None, "policy_names": []}
+    pols = _as_list(await _zs_get(c, f"{root}/detections/policies", tok), "policies")
+    out["policies"] = len(pols)
+    out["policy_names"] = [str(p.get("name") or "") for p in pols if isinstance(p, dict)][:50]
+    for key, path in (("providers", "llm-providers"), ("applications", "llm-applications")):
+        try:
+            out[key] = len(_as_list(await _zs_get(c, f"{root}/{path}", tok)))
+        except httpx.HTTPError:
+            pass
+    return out
+
+
+async def collect_zscaler(cfg):
+    z = cfg["zscaler"]
+    products = ("zia", "zpa", "zdx", "aiguard")
+    ready = z["enabled"] and z["vanity"] and z["client_id"] and z["client_secret"]
+    if not ready:
+        return {p: {"configured": False} for p in products}
+    if not (LABEL_RE.match(z["vanity"]) and LABEL_RE.match(z["cloud"])):
+        bad = {"configured": True, "ok": False, "error": "Vanity domain and cloud may only contain letters, digits and hyphens"}
+        return {p: dict(bad) for p in products}
+    base = f"https://api.{z['cloud']}.zsapi.net" if z["cloud"] else "https://api.zsapi.net"
+    out = {}
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        try:
+            tok = await _zs_token(c, z)
+        except Exception as e:  # noqa: BLE001
+            msg = "Sign-in failed: " + _err(e)
+            return {p: ({"configured": True, "ok": False, "error": msg} if z[p] else {"configured": False})
+                    for p in products}
+        calls = {"zia": lambda: _zia(c, base, tok), "zpa": lambda: _zpa(c, base, tok, z["zpa_customer_id"]),
+                 "zdx": lambda: _zdx(c, base, tok), "aiguard": lambda: _aiguard(c, base, tok)}
+
+        async def one(p):
+            if not z[p]:
+                return p, {"configured": False}
+            try:
+                return p, {"configured": True, "ok": True, "error": "", **(await calls[p]())}
+            except Exception as e:  # noqa: BLE001
+                return p, {"configured": True, "ok": False, "error": _err(e)}
+        for p, res in await asyncio.gather(*(one(p) for p in products)):
+            out[p] = res
+    return out
+
+
+async def collect_all(cfg, prev):
+    snmp, unifi, proxmox, zs = await asyncio.gather(
+        collect_snmp(cfg, prev), collect_unifi(cfg), collect_proxmox(cfg), collect_zscaler(cfg))
+    return {"snmp": snmp, "unifi": unifi, "proxmox": proxmox, **zs}

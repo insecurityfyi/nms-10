@@ -1,0 +1,11 @@
+services:
+  nsm10:
+    build: .
+    container_name: nsm10
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - nsm_data:/data
+volumes:
+  nsm_data:
