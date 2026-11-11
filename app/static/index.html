@@ -76,6 +76,11 @@ label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-s
 .linklab{font-size:11px;line-height:1.3;background:#0D1117;border:1px solid #2F4A6B;border-radius:10px;padding:3px 9px;color:var(--soft);margin-bottom:11px;position:relative;white-space:nowrap;text-align:center}
 .linklab::after{content:"";position:absolute;left:50%;top:100%;height:12px;border-left:1px dashed #4A7FB8}
 .linklab.down{color:var(--crit);border-color:#6B3A3A}
+.links{display:flex;gap:10px;position:relative;padding-top:10px;margin-bottom:12px}
+.links .linklab{margin-bottom:0}
+.links .linklab::before{content:"";position:absolute;left:50%;bottom:100%;height:10px;border-left:1px dashed #4A7FB8}
+.links.multi::before,.links.multi::after{content:"";position:absolute;left:18%;right:18%;border-top:1px dashed #4A7FB8}
+.links.multi::before{top:0}.links.multi::after{bottom:-12px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--mute);margin-top:6px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
@@ -335,7 +340,7 @@ function treeMap(key, title, roots, opts) {
     index[n.id] = n;
     const kids = (n.children || []).map(node);
     if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox"}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, 6))));
-    return $("li", null, n.link ? $("span", {class: "linklab" + (n.linkDown ? " down" : "")}, n.link) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
+    return $("li", null, (n.links || (n.link ? [{text: n.link, down: n.linkDown}] : [])).length ? $("div", {class: "links" + ((n.links || []).length > 1 ? " multi" : "")}, (n.links || [{text: n.link, down: n.linkDown}]).map(l => $("span", {class: "linklab" + (l.down ? " down" : "")}, l.text))) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
       $("span", {class: "nm"}, icon(n.kind), n.title),
       n.sub ? $("span", {class: "mute"}, n.sub) : null,
       n.status ? $("span", {class: n.status.ok === true ? "ok" : n.status.ok === false ? "crit" : "warn"}, (n.status.ok === true ? "● " : n.status.ok === false ? "✕ " : "▲ ") + n.status.text) : null,
@@ -416,8 +421,9 @@ function firewallaTopology() {
   const boxes = s.boxes.map(b => { const mine = list.filter(d => d.gid === b.gid), nets = {};
     mine.forEach(d => { (nets[d.network || "Unassigned"] = nets[d.network || "Unassigned"] || []).push(d); });
     return {id: "b:" + b.gid, kind: "gateway", title: b.name, sub: "Firewalla " + b.model + (b.mode ? " · " + b.mode : ""), status: {ok: b.online, text: b.online ? "Online" : "Offline"},
-      link: !b.online ? "✕ Box offline" : b.down_bps != null ? "↓ " + bps(b.down_bps) + "   ↑ " + bps(b.up_bps) : "Link up · speed not reported", linkDown: !b.online,
-      lines: [b.public_ip && "WAN " + b.public_ip, b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
+      links: !b.online ? [{text: "✕ Box offline", down: true}] : (b.wans || []).length > 1 ? b.wans.map(w => ({text: w.name + (w.ip ? " · " + w.ip : "")}))
+        : [{text: b.down_bps != null ? "↓ " + bps(b.down_bps) + "   ↑ " + bps(b.up_bps) : "Link up · speed not reported"}],
+      lines: [(b.wans || []).length > 1 && b.online && b.down_bps != null && "All links ↓ " + bps(b.down_bps) + "  ↑ " + bps(b.up_bps), b.public_ip && "Public IP " + b.public_ip, b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
       children: Object.keys(nets).sort().map(n => { const ds = nets[n].slice().sort((x, y) => (y.online - x.online) || x.name.localeCompare(y.name));
         return {id: "b:" + b.gid + ":" + n, kind: "switch", title: n, sub: "Network", lines: [ds.filter(d => d.online).length + " of " + ds.length + " online"], leaves: ds.map(d => ({name: d.name, sub: d.ip, ok: d.online})), leafTitle: "Devices"}; })}; });
   const live = s.boxes.filter(b => b.online && b.down_bps != null), up = s.boxes.filter(b => b.online).length;
@@ -469,9 +475,9 @@ function vFirewalla() {
       kv("Devices online", s.devices_total == null ? null : s.devices_online + " of " + s.devices_total),
       kv("Active alarms", s.alarm_count, s.alarm_count ? "warn" : ""), kv("Rules", sum("rules"))),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Boxes")), s.traffic_window_s ? $("p", {class: "note", style: "margin:0 0 8px"}, "Internet traffic is an estimate: the average over the last " + Math.round(s.traffic_window_s / 60 * 10) / 10 + " minutes of completed flows, per box. Firewalla\u2019s API does not report per-interface counters.") : null, $("div", {class: "scroll"}, $("table", null,
-      $("thead", null, $("tr", null, ["Box", "Model", "Mode", "Status", "Internet down / up (est.)", "Version", "Public IP", "Devices", "Rules", "Alarms"].map(h => $("th", null, h)))),
+      $("thead", null, $("tr", null, ["Box", "Model", "Mode", "Status", "Internet connections", "Internet down / up (est.)", "Version", "Public IP", "Devices", "Rules", "Alarms"].map(h => $("th", null, h)))),
       $("tbody", null, s.boxes.map(b => $("tr", null, $("td", {style: "font-weight:500"}, b.name), $("td", null, b.model), $("td", null, b.mode || dash),
-        $("td", {class: b.online ? "ok" : "crit"}, b.online ? "\u25CF Online" : "\u2715 Offline"), $("td", {class: "mono"}, b.down_bps == null ? dash : bps(b.down_bps) + " / " + bps(b.up_bps)), $("td", {class: "mono mute"}, b.version || dash), $("td", {class: "mono mute"}, b.public_ip || dash),
+        $("td", {class: b.online ? "ok" : "crit"}, b.online ? "\u25CF Online" : "\u2715 Offline"), $("td", null, (b.wans || []).length ? b.wans.map(w => $("div", null, w.name, w.ip ? $("span", {class: "mono mute"}, "  " + w.ip) : null)) : $("span", {class: "mute"}, "Not detected")), $("td", {class: "mono"}, b.down_bps == null ? dash : bps(b.down_bps) + " / " + bps(b.up_bps)), $("td", {class: "mono mute"}, b.version || dash), $("td", {class: "mono mute"}, b.public_ip || dash),
         $("td", {class: "mono"}, b.devices == null ? dash : b.devices), $("td", {class: "mono"}, b.rules == null ? dash : b.rules), $("td", {class: "mono"}, b.alarms == null ? dash : b.alarms))))))),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Active alarms"), s.alarm_count > s.alarm_list.length && $("span", {class: "mute"}, "Newest " + s.alarm_list.length + " of " + s.alarm_count)),
       s.alarm_list.length ? $("div", {class: "scroll"}, $("table", null,

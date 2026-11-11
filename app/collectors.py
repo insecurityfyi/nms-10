@@ -377,7 +377,7 @@ async def collect_firewalla(cfg):
                       "mode": b.get("mode") or "", "online": bool(b.get("online")), "version": b.get("version") or "",
                       "public_ip": b.get("publicIP") or "", "last_seen": b.get("lastSeen"),
                       "devices": b.get("deviceCount"), "rules": b.get("ruleCount"), "alarms": b.get("alarmCount"),
-                      "down_bps": None, "up_bps": None}
+                      "down_bps": None, "up_bps": None, "wans": []}
                      for b in _as_list(r.json(), "results") if isinstance(b, dict)]
             out = {"configured": True, "ok": True, "error": "", "boxes": boxes,
                    "devices_total": None, "devices_online": None, "device_list": [],
@@ -421,6 +421,34 @@ async def collect_firewalla(cfg):
                         b["down_bps"], b["up_bps"] = round(d * 8 / window), round(u * 8 / window)
                     out["traffic_window_s"] = round(window)
             except httpx.HTTPError:
+                pass
+            # WAN connections per box. The API has no interface list, but traffic that arrives at a
+            # WAN interface itself is recorded against an "if:<id>" pseudo-device, one id per WAN.
+            try:
+                extra = []
+                try:
+                    r = await c.get(base + "/flows", headers=headers, params={"query": "direction:inbound", "limit": 500})
+                    if r.status_code == 200:
+                        extra = [x for x in _as_list(r.json(), "results") if isinstance(x, dict)]
+                except httpx.HTTPError:
+                    pass
+                wans = {}
+                for x in (flows if "flows" in locals() else []) + extra:
+                    for part in (x.get("device"), x.get("source"), x.get("destination")):
+                        if not isinstance(part, dict) or not str(part.get("id") or "").startswith("if:"):
+                            continue
+                        w = wans.setdefault(x.get("gid"), {}).setdefault(part["id"], {"id": part["id"], "names": set(), "ips": set()})
+                        if part.get("name"):
+                            w["names"].add(str(part["name"]))
+                        if part.get("ip"):
+                            w["ips"].add(str(part["ip"]))
+                for b in boxes:
+                    found = sorted(wans.get(b["gid"], {}).values(), key=lambda w: w["id"])
+                    b["wans"] = [{"id": w["id"], "name": sorted(w["names"])[0] if w["names"] else f"WAN {i + 1}",
+                                  # one stable address means it is the WAN's own; many means remote peers
+                                  "ip": next(iter(w["ips"])) if len(w["ips"]) == 1 else ""}
+                                 for i, w in enumerate(found)]
+            except Exception:  # noqa: BLE001 - best effort; never fail the source over this
                 pass
             try:  # optional: active alarms, newest first
                 r = await c.get(base + "/alarms", headers=headers,
