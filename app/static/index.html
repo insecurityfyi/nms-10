@@ -55,6 +55,23 @@ label.check{flex-direction:row;align-items:center;gap:8px;min-height:44px;font-s
 .center{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .center .card{width:100%;max-width:380px;display:flex;flex-direction:column;gap:14px}
 .empty{color:var(--mute);padding:14px 0}
+.tree{overflow-x:auto;padding:6px 0 10px}
+.tree ul{display:flex;justify-content:center;list-style:none;margin:0;padding:22px 0 0;position:relative;min-width:max-content}
+.tree li{position:relative;padding:22px 7px 0;display:flex;flex-direction:column;align-items:center}
+.tree li::before,.tree li::after{content:"";position:absolute;top:0;right:50%;width:50%;height:22px;border-top:1px dashed #4A7FB8}
+.tree li::after{right:auto;left:50%;border-left:1px dashed #4A7FB8}
+.tree li:only-child::before,.tree li:only-child::after{display:none}
+.tree li:only-child{padding-top:0}
+.tree li:first-child::before,.tree li:last-child::after{border:0 none}
+.tree li:last-child::before{border-right:1px dashed #4A7FB8}
+.tree ul ul::before{content:"";position:absolute;top:0;left:50%;height:22px;border-left:1px dashed #4A7FB8}
+.tree>ul{padding-top:0}.tree>ul>li{padding-top:0}.tree>ul>li::before,.tree>ul>li::after{display:none}
+.tnode{min-height:44px;width:158px;padding:10px 12px;text-align:left;background:#101A28;border:1px solid #2F4A6B;border-radius:8px;display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:1.35}
+.tnode.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.tnode .nm{font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;overflow-wrap:anywhere}
+.tnode svg{flex:none}
+.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{background:var(--inset);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;min-width:130px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--mute);margin-top:6px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 </head>
@@ -144,12 +161,14 @@ const TITLES = {overview: "Overview", alerts: "Alerts", snmp: "SNMP devices", un
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
+  const topo = document.getElementById("topo"), keep = topo ? topo.scrollLeft : 0;
   const body = {overview: vOverview, alerts: vAlerts, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, zscaler: vZscaler, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
       $("button", {type: "button", onclick: async () => { await api("/api/poll", "POST", {}); setTimeout(() => refresh(false), 3000); }}, "Poll now")),
     body)));
+  const t2 = document.getElementById("topo"); if (t2 && keep) t2.scrollLeft = keep;
 }
 function notReady(name, label) {
   const s = src(name);
@@ -239,10 +258,54 @@ function unifiSummary() {
     kv("Wi-Fi clients", s.clients.wireless), kv("Wired clients", s.clients.wired),
     kv("Firmware updates", s.counts.updates ? "▲ " + s.counts.updates + " available" : "None", s.counts.updates ? "warn" : ""));
 }
+let uniSel = "";
+const ICONS = {
+  gateway: '<path d="M3 15h18v5H3z"/><path d="M7 17.5h.01M11 17.5h.01"/><path d="M12 15V9"/><path d="M8.5 6.5a5 5 0 0 1 7 0"/>',
+  switch: '<rect x="2.5" y="8" width="19" height="8" rx="1.5"/><path d="M6 12h.01M9.5 12h.01M13 12h.01M16.5 12h.01"/>',
+  ap: '<path d="M4.5 10a11 11 0 0 1 15 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><path d="M12 17.5h.01"/>',
+  other: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M9 20h6"/>'};
+function icon(kind) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [k, v] of Object.entries({width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true"})) el.setAttribute(k, v);
+  el.innerHTML = ICONS[kind] || ICONS.other;  /* static markup from ICONS only */
+  return el;
+}
+function topology() {
+  const s = src("unifi"), kinds = {ap: "Access point", switch: "Switch", gateway: "Gateway", other: "Device"}, rank = {gateway: 0, switch: 1, ap: 2, other: 3};
+  const byId = {}; s.devices.forEach(d => { if (d.id) byId[d.id] = d; });
+  const kids = {}, roots = [];
+  s.devices.forEach(d => { if (d.uplink && byId[d.uplink] && d.uplink !== d.id) (kids[d.uplink] = kids[d.uplink] || []).push(d); else roots.push(d); });
+  const order = list => list.slice().sort((a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name));
+  const linked = s.devices.some(d => d.uplink && byId[d.uplink]);
+  const seen = new Set();
+  const node = d => {
+    if (seen.has(d.id || d.name)) return null; seen.add(d.id || d.name);
+    const on = d.state === "ONLINE", ch = order(kids[d.id] || []);
+    return $("li", null, $("button", {type: "button", class: "tnode" + (uniSel && uniSel === d.id ? " sel" : ""), "aria-pressed": uniSel === d.id ? "true" : "false", onclick: () => { uniSel = uniSel === d.id ? "" : d.id; render(); }},
+      $("span", {class: "nm"}, icon(d.kind), d.name),
+      $("span", {class: "mute"}, kinds[d.kind] + (d.model ? " \u00b7 " + d.model : "")),
+      $("span", {class: on ? "ok" : "crit"}, (on ? "\u25CF " : "\u2715 ") + (on ? "Online" : (d.state || "Unknown").charAt(0) + (d.state || "Unknown").slice(1).toLowerCase())),
+      d.uptime_s != null && $("span", {class: "mute"}, "Uptime " + dur(d.uptime_s)),
+      $("span", {class: "mute"}, d.clients + " client" + (d.clients === 1 ? "" : "s"))),
+      ch.length ? $("ul", null, ch.map(node)) : null);
+  };
+  const tree = $("div", {class: "tree", id: "topo", tabindex: "0", role: "group", "aria-label": "UniFi topology map"}, $("ul", null, order(roots).map(node)));
+  const sel = byId[uniSel], list = s.client_list || [], shown = sel ? list.filter(c => c.uplink === sel.id) : list;
+  const group = (title, type) => { const g = shown.filter(c => c.type === type), max = 12; return $("div", {style: "flex:1 1 320px;min-width:0"},
+    $("div", {style: "font-weight:600;margin-bottom:8px"}, title + " (" + g.length + ")"),
+    g.length ? $("div", {class: "chips"}, g.slice(0, max).map(c => $("div", {class: "chip"}, $("div", {style: "font-weight:500;overflow-wrap:anywhere"}, c.name || dash), $("div", {class: "mono mute"}, c.ip || dash))), g.length > max && $("div", {class: "chip mute", style: "display:flex;align-items:center"}, "\u2026 " + (g.length - max) + " more")) : $("div", {class: "mute"}, "None")); };
+  return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Topology map"), $("span", {class: "mute"}, "Select a device to see its clients")),
+    !linked && s.devices.length > 1 && $("div", {class: "warn", style: "margin-bottom:8px"}, "\u25B2 This controller did not report uplinks, so devices are shown without links."),
+    tree,
+    $("div", {class: "legend"}, $("span", null, "- - -  Uplink reported by UniFi"), $("span", {class: "ok"}, "\u25CF Online"), $("span", {class: "crit"}, "\u2715 Offline")),
+    $("div", {style: "border-top:1px solid var(--line);margin-top:14px;padding-top:14px"},
+      $("div", {class: "mute", style: "margin-bottom:10px"}, sel ? "Clients on " + sel.name : "All clients"),
+      $("div", {style: "display:flex;flex-wrap:wrap;gap:20px"}, group("Wired clients", "wired"), group("Wireless clients", "wireless"))));
+}
 function vUnifi() {
   const bad = notReady("unifi", "UniFi"); if (bad) return $("section", {class: "card"}, bad);
   const s = src("unifi"), kinds = {ap: "Access point", switch: "Switch", gateway: "Gateway", other: "Other"};
-  return [$("section", {class: "card"}, unifiSummary()),
+  return [topology(), $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Summary")), unifiSummary()),
     $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Devices")), $("div", {class: "scroll"}, $("table", null,
       $("thead", null, $("tr", null, ["Device", "Type", "Model", "Address", "Site", "Status"].map(h => $("th", null, h)))),
       $("tbody", null, s.devices.map(d => $("tr", null, $("td", {style: "font-weight:500"}, d.name), $("td", null, kinds[d.kind]), $("td", null, d.model), $("td", {class: "mono mute"}, d.ip || dash), $("td", null, d.site),

@@ -3,7 +3,7 @@
 Read-only monitoring dashboard for a small network:
 
 - **SNMP** devices (v2c and v3): subnet discovery, reachability, uptime, CPU load, uplink traffic
-- **Ubiquiti UniFi** via the UniFi Network Integration API (API key)
+- **Ubiquiti UniFi** via the UniFi Network Integration API (API key), with a topology map
 - **Proxmox VE** via API token: nodes, guests, storage
 - **Zscaler** via OneAPI: ZIA, ZPA, ZDX and AI Security (AI Guard)
 

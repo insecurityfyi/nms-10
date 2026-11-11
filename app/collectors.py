@@ -227,25 +227,56 @@ async def collect_unifi(cfg):
         async with httpx.AsyncClient(verify=u["verify_tls"], timeout=TIMEOUT) as c:
             sites = await _paged(c, base + "/sites", headers)
             devices, clients = [], {"wired": 0, "wireless": 0, "other": 0}
+            client_list, sem = [], asyncio.Semaphore(8)
+
+            async def extra(sid, d):
+                """Detail (uplink) and latest statistics for one device; both optional."""
+                out = {}
+                for key, path in (("detail", ""), ("stats", "/statistics/latest")):
+                    try:
+                        async with sem:
+                            r = await c.get(f"{base}/sites/{sid}/devices/{d.get('id')}{path}", headers=headers)
+                        if r.status_code == 200:
+                            out[key] = r.json()
+                    except httpx.HTTPError:
+                        pass
+                return out
+
             for s in sites:
                 sid, sname = s.get("id"), s.get("name") or s.get("internalReference") or ""
-                for d in await _paged(c, f"{base}/sites/{sid}/devices", headers):
+                listed = await _paged(c, f"{base}/sites/{sid}/devices", headers)
+                extras = await asyncio.gather(*(extra(sid, d) for d in listed))
+                for d, x in zip(listed, extras):
+                    d = {**d, **(x.get("detail") or {})}
+                    st = x.get("stats") or {}
+                    up = d.get("uplink") if isinstance(d.get("uplink"), dict) else {}
                     devices.append({
+                        "id": str(d.get("id") or ""), "uplink": str(up.get("deviceId") or d.get("uplinkDeviceId") or ""),
                         "name": d.get("name") or d.get("model") or "", "model": d.get("model") or "",
                         "ip": d.get("ipAddress") or "", "state": str(d.get("state") or "").upper(),
                         "site": sname, "kind": _unifi_kind(d),
                         "update": bool(d.get("firmwareUpdatable")),
+                        "uptime_s": st.get("uptimeSec"), "cpu": st.get("cpuUtilizationPct"),
+                        "mem": st.get("memoryUtilizationPct"), "clients": 0,
                     })
                 for cl in await _paged(c, f"{base}/sites/{sid}/clients", headers):
                     t = str(cl.get("type") or "").upper()
-                    clients["wired" if t == "WIRED" else "wireless" if t == "WIRELESS" else "other"] += 1
+                    kind = "wired" if t == "WIRED" else "wireless" if t == "WIRELESS" else "other"
+                    clients[kind] += 1
+                    if len(client_list) < 3000:
+                        client_list.append({"name": cl.get("name") or cl.get("macAddress") or "", "ip": cl.get("ipAddress") or "",
+                                            "type": kind, "uplink": str(cl.get("uplinkDeviceId") or "")})
+        by_id = {d["id"]: d for d in devices if d["id"]}
+        for cl in client_list:
+            if cl["uplink"] in by_id:
+                by_id[cl["uplink"]]["clients"] += 1
         counts = {k: sum(1 for d in devices if d["kind"] == k) for k in ("ap", "switch", "gateway", "other")}
         counts["total"] = len(devices)
         counts["online"] = sum(1 for d in devices if d["state"] == "ONLINE")
         counts["updates"] = sum(1 for d in devices if d["update"])
         clients["total"] = sum(clients.values())
         return {"configured": True, "ok": True, "error": "", "sites": len(sites),
-                "devices": devices, "counts": counts, "clients": clients}
+                "devices": devices, "counts": counts, "clients": clients, "client_list": client_list}
     except Exception as e:  # noqa: BLE001 - report any failure on the card
         return {"configured": True, "ok": False, "error": _err(e)}
 
