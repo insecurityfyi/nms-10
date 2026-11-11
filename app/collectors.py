@@ -266,8 +266,13 @@ async def collect_proxmox(cfg):
             r.raise_for_status()
             resources = r.json().get("data", [])
             r = await c.get(base + "/cluster/status", headers=headers)
-            r.raise_for_status()
-            status = r.json().get("data", [])
+            # Needs Sys.Audit; without it, carry on with quorum unknown.
+            status = r.json().get("data", []) if r.status_code == 200 else []
+            denied = r.status_code in (401, 403)
+        if denied and not resources:
+            return {"configured": True, "ok": False, "error":
+                    "The API token signed in but has no permissions. In Proxmox, add an API Token "
+                    "Permission for it: path /, role PVEAuditor."}
         cluster = next((s for s in status if s.get("type") == "cluster"), None)
         nodes, guests, storage = [], [], []
         for x in resources:
