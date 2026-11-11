@@ -623,6 +623,91 @@ async def _aiguard(c, base, tok):
     return out
 
 
+async def zdx_users(cfg, hours, max_detail=50):
+    """ZDX users active in the last `hours`, with their devices, locations and app scores.
+
+    Costs one request per page of users plus up to two per detailed user, so it is run on a
+    slow schedule and capped; ZDX rate limits are tight."""
+    z = cfg["zscaler"]
+    if not (z["enabled"] and z["zdx"] and z["vanity"] and z["client_id"] and z["client_secret"]):
+        return {"configured": False}
+    if not (LABEL_RE.match(z["vanity"]) and LABEL_RE.match(z["cloud"])):
+        return {"configured": True, "ok": False, "error": "Check the Zscaler vanity domain", "updated": time.time()}
+    base = (f"https://api.{z['cloud']}.zsapi.net" if z["cloud"] else "https://api.zsapi.net") + "/zdx/v1"
+    out = {"configured": True, "ok": True, "error": "", "hours": hours, "updated": time.time(),
+           "total": 0, "detailed": 0, "limited": False, "users": []}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            tok = await _zs_token(c, z)
+            listed, offset = [], None
+            for _ in range(20):
+                params = {"since": hours, "limit": 200}
+                if offset:
+                    params["offset"] = offset
+                body = await _zs_get(c, base + "/users", tok, params)
+                page = body[0] if isinstance(body, list) and body and isinstance(body[0], dict) and "users" in body[0] else body
+                listed += [u for u in _as_list(page, "users") if isinstance(u, dict)]
+                offset = page.get("next_offset") if isinstance(page, dict) else None
+                if not offset:
+                    break
+            out["total"] = len(listed)
+            sem, limited = asyncio.Semaphore(2), []
+
+            async def get(url):
+                if limited:
+                    return None
+                async with sem:
+                    r = await c.get(url, headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"},
+                                    params={"since": hours})
+                if r.status_code == 429:
+                    limited.append(1)
+                return r.json() if r.status_code == 200 else None
+
+            def place(items, *keys):
+                names = []
+                for it in items if isinstance(items, list) else []:
+                    if isinstance(it, dict):
+                        text = ", ".join(str(it[k]) for k in keys if it.get(k))
+                        if text and text not in names:
+                            names.append(text)
+                return names
+
+            async def detail(u):
+                rec = {"id": u.get("id"), "name": u.get("name") or "", "email": u.get("email") or "",
+                       "devices": [], "detailed": False}
+                try:
+                    body = await get(f"{base}/users/{u.get('id')}")
+                    if not isinstance(body, dict):
+                        return rec
+                    rec["detailed"] = True
+                    for d in (body.get("devices") or [])[:5]:
+                        if not isinstance(d, dict):
+                            continue
+                        dev = {"id": d.get("id"), "name": d.get("name") or "", "locations": place(d.get("zs_loc"), "name"),
+                               "geo": place(d.get("geo_loc"), "city", "state", "country"), "apps": [], "score": None}
+                        apps = await get(f"{base}/devices/{d.get('id')}/apps")
+                        for a in _as_list(apps, "apps"):
+                            sc = a.get("score") if isinstance(a, dict) else None
+                            if isinstance(sc, (int, float)) and sc >= 0:
+                                dev["apps"].append({"name": a.get("name") or "", "score": round(sc)})
+                        if dev["apps"]:
+                            dev["score"] = round(sum(a["score"] for a in dev["apps"]) / len(dev["apps"]))
+                        rec["devices"].append(dev)
+                except httpx.HTTPError:
+                    pass
+                return rec
+
+            head = listed[:max_detail]
+            out["users"] = list(await asyncio.gather(*(detail(u) for u in head)))
+            out["users"] += [{"id": u.get("id"), "name": u.get("name") or "", "email": u.get("email") or "",
+                              "devices": [], "detailed": False} for u in listed[max_detail:2000]]
+            out["detailed"] = sum(1 for u in out["users"] if u["detailed"])
+            out["limited"] = bool(limited)
+    except Exception as e:  # noqa: BLE001
+        out.update(ok=False, error=_err(e))
+    return out
+
+
 async def collect_zscaler(cfg):
     z = cfg["zscaler"]
     products = ("zia", "zpa", "zdx", "aiguard", "ztw")

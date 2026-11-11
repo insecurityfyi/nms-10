@@ -8,6 +8,8 @@ Read-only monitoring dashboard for a small network:
 - **Firewalla** via the MSP API: boxes, device counts, active alarms
 - **Zscaler** via OneAPI: ZIA, ZPA, ZDX, AI Security (AI Guard) and Zero Trust Branch, including the
   Zscaler data center each connector is attached to
+- **Zscaler users** (ZDX): users by location with devices and experience scores, for the last
+  2 hours, 24 hours or 7 days
 - **Endpoints**: one searchable list of client devices merged from UniFi and Firewalla
 
 All credentials are entered in the app under **Settings & credentials**. They are

@@ -171,7 +171,7 @@ const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", 
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
-  const topo = document.getElementById("topo"), keep = topo ? topo.scrollLeft : 0;
+  const keep = {}; document.querySelectorAll(".tree").forEach(t => { keep[t.id] = t.scrollLeft; });
   const act = document.activeElement, actId = act && act.id, caret = act && act.tagName === "INPUT" ? act.selectionStart : null;
   const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
@@ -179,7 +179,7 @@ function render() {
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
       $("button", {type: "button", onclick: async () => { await api("/api/poll", "POST", {}); setTimeout(() => refresh(false), 3000); }}, "Poll now")),
     body)));
-  const t2 = document.getElementById("topo"); if (t2 && keep) t2.scrollLeft = keep;
+  document.querySelectorAll(".tree").forEach(t => { if (keep[t.id]) t.scrollLeft = keep[t.id]; });
   const again = actId && document.getElementById(actId);
   if (again) { again.focus(); if (caret != null) { try { again.setSelectionRange(caret, caret); } catch (e) {} } }
 }
@@ -347,7 +347,7 @@ function treeMap(key, title, roots, opts) {
       (n.lines || []).filter(Boolean).map(t => $("span", {class: "mute"}, t))),
       kids.length ? $("ul", null, kids) : null);
   };
-  const tree = $("div", {class: "tree", id: "topo", tabindex: "0", role: "group", "aria-label": title}, $("ul", null, roots.map(node)));
+  const tree = $("div", {class: "tree", id: "topo-" + key, tabindex: "0", role: "group", "aria-label": title}, $("ul", null, roots.map(node)));
   const sel = index[cur];
   let panel = null;
   if (opts.panel) panel = opts.panel(sel);
@@ -484,6 +484,48 @@ function vFirewalla() {
         $("thead", null, $("tr", null, ["When", "Alarm", "Device", "Box"].map(h => $("th", null, h)))),
         $("tbody", null, s.alarm_list.map(a => $("tr", null, $("td", {class: "mono mute"}, a.ts ? ago(a.ts) + " ago" : dash), $("td", {style: "white-space:normal;min-width:280px"}, a.message || dash), $("td", null, a.device || dash), $("td", null, a.box || dash)))))) : $("div", {class: "empty"}, "No active alarms."))];
 }
+const zu = {range: "2", sel: "", q: ""};
+const ZU_RANGES = [["2", "Current", "last 2 hours"], ["24", "24 hours", "last 24 hours"], ["168", "1 week", "last 7 days"]];
+function scoreCls(n) { return n == null ? "mute" : n >= 66 ? "ok" : n >= 34 ? "warn" : "crit"; }
+function scoreTxt(n) { return n == null ? dash : (n >= 66 ? "● " : n >= 34 ? "▲ " : "✕ ") + n; }
+function zdxUsers() {
+  if (!src("zdx").configured) return null;
+  const d = (state.zdx_users || {})[zu.range], label = ZU_RANGES.find(r => r[0] === zu.range);
+  const picker = $("div", {role: "group", "aria-label": "Time range", style: "display:flex;gap:6px;flex-wrap:wrap"}, ZU_RANGES.map(r => $("button", {type: "button", "aria-pressed": zu.range === r[0] ? "true" : "false", class: zu.range === r[0] ? "primary" : "", onclick: () => { zu.range = r[0]; zu.sel = ""; render(); }}, r[1])));
+  const head = $("div", {class: "head", style: "align-items:center;flex-wrap:wrap"}, $("h2", null, "Users · ZDX"), picker);
+  if (!d) return $("section", {class: "card"}, head, $("div", {class: "empty"}, "Loading users for the " + label[2] + "… this can take a few minutes the first time."));
+  if (d.configured === false) return null;
+  if (d.ok === false) return $("section", {class: "card"}, head, $("div", {class: "warn", role: "status"}, "▲ " + (d.error || "Could not load users")));
+  const users = (d.users || []).map(u => { const scores = u.devices.map(x => x.score).filter(x => x != null);
+    return Object.assign({}, u, {score: scores.length ? Math.min.apply(null, scores) : null, locs: [].concat.apply([], u.devices.map(x => x.locations.length ? x.locations : x.geo)).filter((v, i, a) => v && a.indexOf(v) === i)}); });
+  const groups = {}; users.forEach(u => { (u.locs.length ? u.locs : [u.detailed ? "Location not reported" : "Not detailed"]).forEach(l => { (groups[l] = groups[l] || []).push(u); }); });
+  const order = Object.keys(groups).sort((a, b) => (a === "Not detailed") - (b === "Not detailed") || groups[b].length - groups[a].length || a.localeCompare(b));
+  const leaf = u => ({name: u.name || u.email, sub: (u.devices.length ? u.devices.length + " device" + (u.devices.length === 1 ? "" : "s") : "No device detail") + (u.score != null ? " · score " + u.score : ""), ok: u.score == null ? null : u.score >= 66});
+  const root = {id: "zu", kind: "cloud", title: "ZDX users", sub: label[1] + " · " + label[2], lines: [d.total + " active user" + (d.total === 1 ? "" : "s"), order.filter(l => l !== "Not detailed").length + " locations"],
+    children: order.slice(0, 12).map(l => { const g = groups[l], sc = g.map(u => u.score).filter(x => x != null), avg = sc.length ? Math.round(sc.reduce((a, b) => a + b, 0) / sc.length) : null;
+      return {id: "zu:" + l, kind: l === "Not detailed" || l === "Location not reported" ? "other" : "switch", title: l, sub: "Location", status: avg == null ? null : {ok: avg >= 66 ? true : avg >= 34 ? null : false, text: "Average score " + avg}, lines: [g.length + " user" + (g.length === 1 ? "" : "s")], leafTitle: "Users", leaves: g.map(leaf)}; })};
+  const sel = users.find(u => String(u.id) === zu.sel), q = zu.q.trim().toLowerCase();
+  const list = users.filter(u => !q || [u.name, u.email].concat(u.locs).some(x => String(x || "").toLowerCase().includes(q)));
+  const detail = sel && $("div", {class: "inset", style: "margin:14px 0"}, $("div", {class: "head"}, $("strong", null, sel.name || sel.email), $("button", {type: "button", onclick: () => { zu.sel = ""; render(); }}, "Close")),
+    kv("Email", sel.email || null), kv("Lowest device score", sel.score == null ? null : scoreTxt(sel.score), scoreCls(sel.score)),
+    sel.devices.length ? sel.devices.map(x => $("div", {style: "margin-top:12px"}, $("div", {style: "font-weight:600"}, x.name || "Device"),
+      kv("Zscaler location", x.locations.join(", ") || null), kv("Geolocation", x.geo.join("; ") || null), kv("Device score", x.score == null ? null : scoreTxt(x.score), scoreCls(x.score)),
+      x.apps.length ? $("div", {class: "chips", style: "margin-top:8px"}, x.apps.map(a => chipEl({name: a.name, sub: "Score " + a.score, ok: a.score >= 66}))) : null)) : $("div", {class: "mute", style: "margin-top:8px"}, "No device details were loaded for this user."));
+  const max = 200;
+  return [$("section", {class: "card"}, head,
+      $("p", {class: "note", style: "margin:0"}, d.total + " users active in the " + label[2] + ". Devices, locations and scores are loaded for " + d.detailed + " of them" + (d.limited ? " (Zscaler rate limit reached)" : "") + ". Updated " + ago(d.updated) + " ago.")),
+    treeMap("zdxusers", "User map · " + label[1], [root], {hint: "Users grouped by where ZDX saw them. Select a location to list its users."}),
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Users · " + label[1])),
+      detail,
+      $("label", {for: "zuq", style: "max-width:420px;margin-bottom:10px"}, "Search user, email or location", $("input", {id: "zuq", type: "search", value: zu.q, autocomplete: "off", spellcheck: "false", oninput: ev => { zu.q = ev.target.value; render(); }})),
+      list.length ? $("div", {class: "scroll"}, $("table", null,
+        $("thead", null, $("tr", null, ["User", "Email", "Devices", "Location", "Score", "Lowest-scoring app"].map(h => $("th", null, h)))),
+        $("tbody", null, list.slice(0, max).map(u => { const apps = [].concat.apply([], u.devices.map(x => x.apps)).sort((a, b) => a.score - b.score);
+          return $("tr", null, $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (zu.sel === String(u.id) ? ";border-color:var(--accent)" : ""), "aria-pressed": zu.sel === String(u.id) ? "true" : "false", onclick: () => { zu.sel = zu.sel === String(u.id) ? "" : String(u.id); render(); }}, u.name || u.email || u.id)),
+            $("td", {class: "mute"}, u.email || dash), $("td", {class: "mono"}, u.detailed ? u.devices.length : dash), $("td", null, u.locs.join(", ") || dash), $("td", {class: "mono " + scoreCls(u.score)}, scoreTxt(u.score)),
+            $("td", null, apps.length ? apps[0].name + " (" + apps[0].score + ")" : dash)); })))) : $("div", {class: "empty"}, "No users match."),
+      list.length > max ? $("p", {class: "note"}, "Showing the first " + max + " of " + list.length + ".") : null)];
+}
 function zsPanel(name, title, build) {
   const s = src(name), bad = notReady(name, "This product");
   return $("div", {class: "inset"}, $("div", {style: "font-weight:600;margin-bottom:8px"}, title), bad || build(s));
@@ -497,7 +539,7 @@ function zsPanels() {
     zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
 }
 function vZscaler() {
-  const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels())], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
+  const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels()), zdxUsers()], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
   const zia = src("zia");
   if (zia.ok && zia.gre && zia.gre.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZIA GRE tunnels")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Source IP", "Primary data center", "Primary VIP", "Secondary data center", "Secondary VIP", "Internal range", "Comment"].map(h => $("th", null, h)))),

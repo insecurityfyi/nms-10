@@ -18,6 +18,10 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
 - `app/static/index.html` - whole UI in one file, vanilla JS, no build step
 - `Dockerfile`, `docker-compose.yml`, `install.sh`, `deploy.ps1` - packaging and deploy
 
+ZDX user data (`collectors.zdx_users`) is fetched by a separate slow loop in `main.py`
+(`zdx_users_loop`, windows of 2/24/168 hours) because it costs many API calls and ZDX rate
+limits are tight. Keep it capped.
+
 ## Run and test
 
     pip install -r requirements.txt
