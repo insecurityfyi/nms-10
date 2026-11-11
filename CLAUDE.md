@@ -29,7 +29,7 @@ and discovery. There is no automated test suite yet.
 
 Target is the Ubuntu server at 192.168.7.10, Docker Compose, port 8080:
 
-    ssh <user>@192.168.7.10 'cd nsm-10 && git pull && sudo bash install.sh'
+    ssh <user>@192.168.7.10 'sudo nsm-update'     # update.sh: pull + rebuild
 
 Settings and secrets live in the `nsm_data` volume and survive redeploys.
 

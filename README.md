@@ -21,6 +21,13 @@ Or on the server itself:
 
     git clone https://github.com/insecurityfyi/nms-10 nsm-10 && cd nsm-10 && sudo bash install.sh
 
+To update later, one command on the server:
+
+    sudo nsm-update
+
+(The first time, install that command with
+`curl -fsSL https://raw.githubusercontent.com/insecurityfyi/nms-10/main/update.sh | sudo bash`.)
+
 Then open `http://192.168.7.10:8080`. The first visit asks you to create the admin
 password. Re-run the same command to update.
 
