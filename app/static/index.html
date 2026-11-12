@@ -343,7 +343,7 @@ function treeMap(key, title, roots, opts) {
     index[n.id] = n;
     const kids = (n.children || []).map(node);
     if (n.leaves && n.leaves.length) kids.push($("li", null, $("div", {class: "leafbox" + (n.leafWide ? " wide" : "")}, $("div", {style: "font-weight:600"}, (n.leafTitle || "Connected") + " (" + n.leaves.length + ")"), chipList(n.leaves, n.leafMax || 6))));
-    return $("li", null, (n.links || (n.link ? [{text: n.link, down: n.linkDown}] : [])).length ? $("div", {class: "links" + ((n.links || []).length > 1 ? " multi" : "")}, (n.links || [{text: n.link, down: n.linkDown}]).map(l => $("span", {class: "linklab" + (l.down ? " down" : "")}, l.text))) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
+    return $("li", null, (n.links || (n.link ? [{text: n.link, down: n.linkDown}] : [])).length ? $("div", {class: "links" + ((n.links || []).length > 1 ? " multi" : "")}, (n.links || [{text: n.link, down: n.linkDown}]).map(l => $("span", {class: "linklab" + (l.down ? " down" : "")}, l.text))) : null, n.linkNote ? $("span", {class: "linklab"}, n.linkNote) : null, $("button", {type: "button", class: "tnode" + (cur === n.id ? " sel" : ""), "aria-pressed": cur === n.id ? "true" : "false", onclick: () => { treeSel[key] = cur === n.id ? "" : n.id; render(); }},
       $("span", {class: "nm"}, icon(n.kind), n.title),
       n.sub ? $("span", {class: "mute"}, n.sub) : null,
       n.status ? $("span", {class: n.status.ok === true ? "ok" : n.status.ok === false ? "crit" : "warn"}, (n.status.ok === true ? "● " : n.status.ok === false ? "✕ " : "▲ ") + n.status.text) : null,
@@ -426,13 +426,16 @@ function firewallaTopology() {
     return {id: "b:" + b.gid, kind: "gateway", title: b.name, sub: "Firewalla " + b.model + (b.mode ? " · " + b.mode : ""), status: {ok: b.online, text: b.online ? "Online" : "Offline"},
       links: !b.online ? [{text: "✕ Box offline", down: true}] : (b.wans || []).length > 1 ? b.wans.map(w => ({text: w.name + (w.ip ? " · " + w.ip : "")}))
         : [{text: b.down_bps != null ? "↓ " + bps(b.down_bps) + "   ↑ " + bps(b.up_bps) : "Link up · speed not reported"}],
-      lines: [(b.wans || []).length > 1 && b.online && b.down_bps != null && "All links ↓ " + bps(b.down_bps) + "  ↑ " + bps(b.up_bps), b.public_ip && "Public IP " + b.public_ip, b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
+      linkNote: (b.wans || []).length > 1 && b.online ? (b.down_bps != null ? "Both links ↓ " + bps(b.down_bps) + "   ↑ " + bps(b.up_bps) : "Speed not reported") : "",
+      lines: [b.public_ip && "Public IP " + b.public_ip, b.devices != null && b.devices + " devices", b.alarms != null && b.alarms + " alarms"],
       children: Object.keys(nets).sort().map(n => { const ds = nets[n].slice().sort((x, y) => (y.online - x.online) || x.name.localeCompare(y.name));
         return {id: "b:" + b.gid + ":" + n, kind: "switch", title: n, sub: "Network", lines: [ds.filter(d => d.online).length + " of " + ds.length + " online"], leaves: ds.map(d => ({name: d.name, sub: d.ip, ok: d.online})), leafTitle: "Devices"}; })}; });
   const live = s.boxes.filter(b => b.online && b.down_bps != null), up = s.boxes.filter(b => b.online).length;
   const root = {id: "inet", kind: "cloud", title: "Internet", sub: "WAN", status: s.boxes.length ? {ok: up === s.boxes.length ? true : up ? null : false, text: up + " of " + s.boxes.length + " boxes online"} : null,
     lines: [live.length ? "Total ↓ " + bps(live.reduce((t, b) => t + b.down_bps, 0)) + "  ↑ " + bps(live.reduce((t, b) => t + b.up_bps, 0)) : null], children: boxes};
-  return treeMap("firewalla", "Topology map", [root], {hint: "Link speeds are recent averages (estimated). Select a network to list its devices."});
+  const age = s.traffic_age_s;
+  return treeMap("firewalla", "Topology map", [root], {hint: "Link speeds are recent averages (estimated). Select a network to list its devices.",
+    note: s.traffic_note || (age != null && age > 1800 ? "Link speeds are from flows that ended " + dur(age) + " ago; Firewalla has not delivered newer ones." : "")});
 }
 function zscalerTopology() {
   const zia = src("zia"), zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard"), kids = [];
@@ -477,7 +480,7 @@ function vFirewalla() {
       kv("Boxes online", s.boxes.filter(b => b.online).length + " of " + s.boxes.length),
       kv("Devices online", s.devices_total == null ? null : s.devices_online + " of " + s.devices_total),
       kv("Active alarms", s.alarm_count, s.alarm_count ? "warn" : ""), kv("Rules", sum("rules"))),
-    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Boxes")), s.traffic_window_s ? $("p", {class: "note", style: "margin:0 0 8px"}, "Internet traffic is an estimate: the average over the last " + Math.round(s.traffic_window_s / 60 * 10) / 10 + " minutes of completed flows, per box. Firewalla\u2019s API does not report per-interface counters.") : null, $("div", {class: "scroll"}, $("table", null,
+    $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Boxes")), s.traffic_window_s ? $("p", {class: "note", style: "margin:0 0 8px"}, "Internet traffic is an estimate: the average over the most recent " + Math.round(s.traffic_window_s / 60 * 10) / 10 + " minutes of completed flows Firewalla has delivered" + (s.traffic_age_s > 120 ? " (newest " + dur(s.traffic_age_s) + " old)" : "") + ", per box. Firewalla\u2019s API does not report per-interface counters.") : null, $("div", {class: "scroll"}, $("table", null,
       $("thead", null, $("tr", null, ["Box", "Model", "Mode", "Status", "Internet connections", "Internet down / up (est.)", "Version", "Public IP", "Devices", "Rules", "Alarms"].map(h => $("th", null, h)))),
       $("tbody", null, s.boxes.map(b => $("tr", null, $("td", {style: "font-weight:500"}, b.name), $("td", null, b.model), $("td", null, b.mode || dash),
         $("td", {class: b.online ? "ok" : "crit"}, b.online ? "\u25CF Online" : "\u2715 Offline"), $("td", null, (b.wans || []).length ? b.wans.map(w => $("div", null, w.name, w.ip ? $("span", {class: "mono mute"}, "  " + w.ip) : null)) : $("span", {class: "mute"}, "Not detected")), $("td", {class: "mono"}, b.down_bps == null ? dash : bps(b.down_bps) + " / " + bps(b.up_bps)), $("td", {class: "mono mute"}, b.version || dash), $("td", {class: "mono mute"}, b.public_ip || dash),
@@ -488,14 +491,52 @@ function vFirewalla() {
         $("tbody", null, s.alarm_list.map(a => $("tr", null, $("td", {class: "mono mute"}, a.ts ? ago(a.ts) + " ago" : dash), $("td", {style: "white-space:normal;min-width:280px"}, a.message || dash), $("td", null, a.device || dash), $("td", null, a.box || dash)))))) : $("div", {class: "empty"}, "No active alarms."))];
 }
 const zu = {range: "2", sel: "", q: ""};
+function num(n) { if (n == null) return dash; const u = ["", "K", "M", "B", "T"]; let i = 0; n = Number(n); while (Math.abs(n) >= 1000 && i < 4) { n /= 1000; i++; } return (i === 0 ? Math.round(n) : n >= 100 ? Math.round(n) : n.toFixed(1)) + u[i]; }
+function rangePicker() {
+  return $("div", {role: "group", "aria-label": "Time range", style: "display:flex;gap:6px;flex-wrap:wrap"}, ZU_RANGES.map(r => $("button", {type: "button", "aria-pressed": zu.range === r[0] ? "true" : "false", class: zu.range === r[0] ? "primary" : "", onclick: () => { zu.range = r[0]; zu.sel = ""; render(); }}, r[1])));
+}
+function simpleTable(heads, rows) {
+  return $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, heads.map(h => $("th", null, h)))), $("tbody", null, rows.map(r => $("tr", null, r.map((c, i) => c && c.nodeType ? c : $("td", i === 0 ? {style: "font-weight:500"} : {class: typeof c === "string" && /^[0-9.,]+ ?[A-Za-z%]*$/.test(c) ? "mono" : ""}, c == null ? dash : c)))))));
+}
+function zsActivity() {
+  const d = (state.zs_insights || {})[zu.range], label = ZU_RANGES.find(r => r[0] === zu.range);
+  if (d && d.configured === false) return null;
+  const title = "Web and app activity · " + label[1];
+  if (!d) return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, title)), $("div", {class: "empty"}, "Loading activity for the " + label[2] + "…"));
+  if (d.ok === false) return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, title)), $("div", {class: "warn", role: "status"}, "▲ Zscaler analytics could not be loaded: " + (d.error || "unknown error")), $("p", {class: "note"}, "This uses Zscaler’s Z-Insights analytics API. Your API client needs access to it; untick Analytics in Settings to hide this section."));
+  const w = d.web || {}, tot = (w.allowed || 0) + (w.blocked || 0), t = d.totals || {};
+  const tiles = $("section", {class: "tiles", "aria-label": "Activity totals"},
+    [["Web transactions allowed", num(w.allowed), ""], ["Web transactions blocked", num(w.blocked), w.blocked != null && tot ? (100 * w.blocked / tot).toFixed(1) + "% of all" : ""], ["Applications seen", num(t.apps), ""], ["Application data", t.bytes == null ? dash : bytes(t.bytes), t.upload != null ? "↑ " + bytes(t.upload) + "  ↓ " + bytes(t.download) : ""]]
+      .map(([k, v, sub]) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v), $("div", {class: "s mute"}, sub || " "))));
+  const out = [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, title), $("span", {class: "mute"}, "Updated " + ago(d.updated) + " ago")), tiles,
+    d.notes && d.notes.length ? $("p", {class: "note"}, "Not available from your tenant: " + d.notes.join("; ") + ".") : null)];
+  if (d.url_categories && d.url_categories.length) { const split = d.url_categories.some(c => c.allowed != null || c.blocked != null);
+    out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "URL categories · allowed and blocked")), simpleTable(split ? ["Category", "Allowed", "Blocked", "Blocked share"] : ["Category", "Transactions"],
+      d.url_categories.slice(0, 60).map(c => split ? [c.name, num(c.allowed), $("td", {class: "mono " + (c.blocked ? "warn" : "")}, num(c.blocked)), (c.allowed || 0) + (c.blocked || 0) ? (100 * (c.blocked || 0) / ((c.allowed || 0) + (c.blocked || 0))).toFixed(1) + "%" : dash] : [c.name, num(c.total)])))); }
+  else out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "URL categories")), $("div", {class: "empty"}, "Zscaler’s analytics API did not offer a URL-category breakdown for this tenant. Allowed and blocked totals, blocked threat categories and application categories are shown instead.")));
+  if (d.threats && d.threats.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Blocked threats by category")), simpleTable(["Threat category", "Transactions"], d.threats.map(x => [x.name, num(x.total)]))));
+  if (d.firewall && d.firewall.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Firewall sessions by action")), simpleTable(["Action", "Sessions"], d.firewall.map(x => [x.name, num(x.total)]))));
+  if (d.app_categories && d.app_categories.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Application categories accessed")), simpleTable(["Category", "Applications", "Users", "Data"], d.app_categories.slice(0, 60).map(c => [c.name, num(c.apps), num(c.users), c.bytes == null ? dash : bytes(c.bytes)]))));
+  if (d.apps && d.apps.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Applications accessed"), $("span", {class: "mute"}, "Top " + Math.min(100, d.apps.length) + " by data")), simpleTable(["Application", "Category", "Status", "Risk", "Users", "Data", "Upload", "Download"],
+    d.apps.slice(0, 100).map(a => [a.name, a.category || dash, a.state ? a.state.charAt(0) + a.state.slice(1).toLowerCase().replace(/_/g, " ") : dash, a.risk == null ? dash : String(a.risk), num(a.users), a.bytes == null ? dash : bytes(a.bytes), a.upload == null ? dash : bytes(a.upload), a.download == null ? dash : bytes(a.download)]))));
+  return out;
+}
+function aiPolicies() {
+  const ai = src("aiguard"); if (!ai.ok || !(ai.policy_list || []).length) return null;
+  const dets = list => list.length ? list.map(x => $("div", {class: x.enabled ? "" : "mute"}, x.detector || "Detector", $("span", {class: /block/i.test(x.action) ? "warn" : "mute"}, " → " + (x.action ? x.action.charAt(0) + x.action.slice(1).toLowerCase() : "no action")), x.enabled ? null : " (off)")) : $("span", {class: "mute"}, "None");
+  return [$("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard policies and what triggers them")),
+      $("p", {class: "note", style: "margin:0 0 10px"}, "Trigger counts are not shown: the AI Guard API available to this app returns policy configuration only, with no statistics on how often a policy or detector fired."),
+      $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Policy", "State", "Default action", "Prompt detectors → action", "Response detectors → action"].map(h => $("th", null, h)))),
+        $("tbody", null, ai.policy_list.map(p => $("tr", null, $("td", {style: "font-weight:500;vertical-align:top"}, p.name), $("td", {style: "vertical-align:top", class: p.enabled ? "" : "mute"}, p.enabled ? "Enabled" : "Disabled"), $("td", {style: "vertical-align:top"}, p.default_action || dash), $("td", {style: "vertical-align:top;white-space:normal"}, dets(p.input)), $("td", {style: "vertical-align:top;white-space:normal"}, dets(p.output)))))))),
+    ai.rules && ai.rules.length ? $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard policy match rules")), simpleTable(["Order", "Rule", "Applies policy", "Type", "State"], ai.rules.slice().sort((a, b) => (a.order || 0) - (b.order || 0)).map(r => [r.order == null ? dash : String(r.order), r.name, r.policy || dash, r.type || dash, r.enabled ? "Enabled" : "Disabled"]))) : null];
+}
 const ZU_RANGES = [["2", "Current", "last 2 hours"], ["24", "24 hours", "last 24 hours"], ["168", "1 week", "last 7 days"]];
 function scoreCls(n) { return n == null ? "mute" : n >= 66 ? "ok" : n >= 34 ? "warn" : "crit"; }
 function scoreTxt(n) { return n == null ? dash : (n >= 66 ? "● " : n >= 34 ? "▲ " : "✕ ") + n; }
 function zdxUsers() {
   if (!src("zdx").configured) return null;
   const d = (state.zdx_users || {})[zu.range], label = ZU_RANGES.find(r => r[0] === zu.range);
-  const picker = $("div", {role: "group", "aria-label": "Time range", style: "display:flex;gap:6px;flex-wrap:wrap"}, ZU_RANGES.map(r => $("button", {type: "button", "aria-pressed": zu.range === r[0] ? "true" : "false", class: zu.range === r[0] ? "primary" : "", onclick: () => { zu.range = r[0]; zu.sel = ""; render(); }}, r[1])));
-  const head = $("div", {class: "head", style: "align-items:center;flex-wrap:wrap"}, $("h2", null, "Users · ZDX"), picker);
+  const head = $("div", {class: "head", style: "align-items:center;flex-wrap:wrap"}, $("h2", null, "Users · ZDX · " + label[1]));
   if (!d) return $("section", {class: "card"}, head, $("div", {class: "empty"}, "Loading users for the " + label[2] + "… this can take a few minutes the first time."));
   if (d.configured === false) return null;
   if (d.ok === false) return $("section", {class: "card"}, head, $("div", {class: "warn", role: "status"}, "▲ " + (d.error || "Could not load users")));
@@ -542,7 +583,10 @@ function zsPanels() {
     zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
 }
 function vZscaler() {
-  const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels()), zdxUsers()], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
+  const anyZs = ["zia", "zpa", "zdx", "aiguard", "ztw"].some(n => src(n).configured);
+  const out = [zscalerTopology(), $("section", {class: "card"}, zsPanels()),
+    anyZs ? $("section", {class: "card"}, $("div", {class: "head", style: "align-items:center;flex-wrap:wrap;margin:0"}, $("div", null, $("h2", null, "Time range"), $("div", {class: "mute", style: "font-size:13px"}, "Applies to activity and users below. Tunnels and connectors always show the current state.")), rangePicker())) : null,
+    zsActivity(), zdxUsers()], zpa = src("zpa"), zdx = src("zdx"), ai = src("aiguard");
   const zia = src("zia");
   if (zia.ok && zia.gre && zia.gre.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZIA GRE tunnels")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Source IP", "Primary data center", "Primary VIP", "Secondary data center", "Secondary VIP", "Internal range", "Comment"].map(h => $("th", null, h)))),
@@ -561,7 +605,7 @@ function vZscaler() {
   if (zdx.ok && zdx.apps.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZDX application scores")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Application", "Score", "Users"].map(h => $("th", null, h)))),
     $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
-  if (ai.ok && ai.policy_names.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))));
+  out.push(aiPolicies() || (ai.ok && ai.policy_names.length ? $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))) : null));
   return out;
 }
 
@@ -636,7 +680,7 @@ function renderSettings() {
       $("div", {class: "form"}, field(S.firewalla, "enabled", "Enabled", {type: "checkbox"}), field(S.firewalla, "domain", "MSP domain", {placeholder: "mydomain.firewalla.net"}), field(S.firewalla, "token", "Personal access token", pw))),
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
-      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Zero Trust Branch", {type: "checkbox"}))),
+      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Zero Trust Branch", {type: "checkbox"}), field(S.zscaler, "zins", "Analytics (Z-Insights)", {type: "checkbox"}))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }

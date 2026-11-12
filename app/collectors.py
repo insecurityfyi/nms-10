@@ -403,15 +403,24 @@ async def collect_firewalla(cfg):
                 r = await c.get(base + "/flows", headers=headers, params={"limit": 500})
                 r.raise_for_status()
                 now = time.time()
-                flows = [x for x in _as_list(r.json(), "results")
-                         if isinstance(x, dict) and isinstance(x.get("ts"), (int, float))]
+                flows = []
+                for x in _as_list(r.json(), "results"):
+                    if isinstance(x, dict):
+                        try:
+                            x["ts"] = float(x.get("ts"))
+                            flows.append(x)
+                        except (TypeError, ValueError):
+                            pass
                 if flows:
-                    # The API has no interface counters. Average the flows that ended in the last
-                    # five minutes, or over the span returned if a busy site fills the page sooner.
-                    window = min(300.0, max(30.0, now - min(x["ts"] for x in flows))) if len(flows) >= 500 else 300.0
+                    # The API has no interface counters, and flows reach the MSP some minutes after
+                    # they end. So measure back from the newest flow received, not from the clock:
+                    # average the five minutes before it (or the span returned, if a busy site
+                    # fills the page sooner).
+                    newest, oldest = max(x["ts"] for x in flows), min(x["ts"] for x in flows)
+                    window = min(300.0, max(30.0, newest - oldest)) if len(flows) >= 500 else 300.0
                     sums = {}
                     for x in flows:
-                        if now - x["ts"] > window or x.get("block") or x.get("direction") == "local":
+                        if newest - x["ts"] > window or x.get("block") or x.get("direction") == "local":
                             continue
                         t = sums.setdefault(x.get("gid"), [0, 0])
                         t[0] += x.get("download") or 0
@@ -420,8 +429,13 @@ async def collect_firewalla(cfg):
                         d, u = sums.get(b["gid"], (0, 0))
                         b["down_bps"], b["up_bps"] = round(d * 8 / window), round(u * 8 / window)
                     out["traffic_window_s"] = round(window)
-            except httpx.HTTPError:
-                pass
+                    out["traffic_age_s"] = max(0, round(now - newest))
+                else:
+                    out["traffic_note"] = "Firewalla returned no flows, so link speed cannot be estimated."
+            except httpx.HTTPStatusError as e:
+                out["traffic_note"] = f"Link speed unavailable: the flows request returned HTTP {e.response.status_code}."
+            except httpx.HTTPError as e:
+                out["traffic_note"] = f"Link speed unavailable: {type(e).__name__}."
             # WAN connections per box. The API has no interface list, but traffic that arrives at a
             # WAN interface itself is recorded against an "if:<id>" pseudo-device, one id per WAN.
             try:
@@ -609,17 +623,187 @@ async def _zdx(c, base, tok):
     return out
 
 
+def _detectors(items):
+    out = []
+    for d in items if isinstance(items, list) else []:
+        if isinstance(d, dict):
+            out.append({"detector": str(d.get("detector") or d.get("name") or ""), "action": str(d.get("action") or ""),
+                        "enabled": d.get("enabled") is not False, "severity": str(d.get("severity") or "")})
+    return out
+
+
 async def _aiguard(c, base, tok):
     root = f"{base}/aiguard/v1"
-    out = {"policies": None, "providers": None, "applications": None, "policy_names": []}
-    pols = _as_list(await _zs_get(c, f"{root}/detections/policies", tok), "policies")
+    out = {"policies": None, "providers": None, "applications": None, "policy_names": [], "policy_list": [], "rules": None}
+    pols = [p for p in _as_list(await _zs_get(c, f"{root}/detections/policies", tok), "policies") if isinstance(p, dict)]
     out["policies"] = len(pols)
-    out["policy_names"] = [str(p.get("name") or "") for p in pols if isinstance(p, dict)][:50]
+    out["policy_names"] = [str(p.get("name") or "") for p in pols][:50]
+    names = {p.get("id"): str(p.get("name") or "") for p in pols}
+    out["policy_list"] = [{
+        "name": str(p.get("name") or ""), "enabled": p.get("enabled") is not False,
+        "default_action": str(p.get("defaultAction") or ""),
+        "input": _detectors(p.get("inputDetectorPolicies")), "output": _detectors(p.get("outputDetectorPolicies")),
+    } for p in pols[:50]]
+    try:
+        rules = [r for r in _as_list(await _zs_get(c, f"{root}/detections/policy-match-rules", tok), "rules") if isinstance(r, dict)]
+        out["rules"] = [{"name": str(r.get("name") or ""), "order": r.get("ruleOrder"), "enabled": r.get("enabled") is not False,
+                         "policy": names.get(r.get("policyId"), str(r.get("policyId") or "")), "type": str(r.get("type") or "")}
+                        for r in rules[:100]]
+    except httpx.HTTPError:
+        pass
     for key, path in (("providers", "llm-providers"), ("applications", "llm-applications")):
         try:
             out[key] = len(_as_list(await _zs_get(c, f"{root}/{path}", tok)))
         except httpx.HTTPError:
             pass
+    return out
+
+
+# ---- Zscaler Z-Insights analytics (GraphQL) ---------------------------------
+
+_Q_WEB = """query($startTime: Long!, $endTime: Long!, $trafficUnit: WebTrafficUnits!, $actionFilter: ActionStatus, $limit: Int) {
+  WEB_TRAFFIC { no_grouping(start_time: $startTime, end_time: $endTime, traffic_unit: $trafficUnit, action_filter: $actionFilter) {
+    entries(limit: $limit) { name total } } } }"""
+_Q_THREATS = """query($startTime: Long!, $endTime: Long!, $trafficUnit: WebTrafficUnits!, $limit: Int) {
+  WEB_TRAFFIC { threat_super_categories(start_time: $startTime, end_time: $endTime, traffic_unit: $trafficUnit) {
+    entries(limit: $limit) { name total } } } }"""
+_Q_FW = """query($startTime: Long!, $endTime: Long!, $limit: Int) {
+  ZERO_TRUST_FIREWALL { action(start_time: $startTime, end_time: $endTime) { entries(limit: $limit) { name total } } } }"""
+_Q_APPS = """query($startTime: Long!, $endTime: Long!, $limit: Int) {
+  SHADOW_IT { apps(start_time: $startTime, end_time: $endTime) { entries(limit: $limit) {
+    application application_category risk_index sanctioned_state data_consumed data_uploaded data_downloaded
+    authenticated_users last_access_time } } } }"""
+_Q_SUMMARY = """query($startTime: Long!, $endTime: Long!) {
+  SHADOW_IT { shadow_it_summary(start_time: $startTime, end_time: $endTime) {
+    total_upload_bytes total_download_bytes total_apps total_bytes
+    group_by_app_cat_for_app { entries { name total } }
+    group_by_app_cat_for_user_count { entries { name total } }
+    group_by_app_cat_for_total_bytes { entries { name total } } } } }"""
+_Q_TYPES = "{ __schema { queryType { fields { name type { name ofType { name } } } } } }"
+_Q_FIELDS = "query($n: String!) { __type(name: $n) { fields { name args { name } } } }"
+
+
+def _entries(node):
+    rows = node.get("entries") if isinstance(node, dict) else None
+    return [{"name": str(e.get("name") or ""), "total": e.get("total") or 0}
+            for e in rows or [] if isinstance(e, dict)]
+
+
+async def zs_insights(cfg, hours):
+    """Aggregate web and application activity for the last `hours` from Z-Insights."""
+    z = cfg["zscaler"]
+    if not (z["enabled"] and z["zins"] and z["vanity"] and z["client_id"] and z["client_secret"]):
+        return {"configured": False}
+    out = {"configured": True, "ok": True, "error": "", "hours": hours, "updated": time.time(), "notes": [],
+           "web": None, "threats": None, "firewall": None, "url_categories": None, "url_categories_field": "",
+           "totals": None, "app_categories": None, "apps": None}
+    if not (LABEL_RE.match(z["vanity"]) and LABEL_RE.match(z["cloud"])):
+        out.update(ok=False, error="Check the Zscaler vanity domain")
+        return out
+    url = (f"https://api.{z['cloud']}.zsapi.net" if z["cloud"] else "https://api.zsapi.net") + "/zins/graphql"
+    end = int(time.time() * 1000)
+    span = {"startTime": end - hours * 3600 * 1000, "endTime": end}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=6.0)) as c:
+            tok = await _zs_token(c, z)
+
+            async def gql(query, variables):
+                r = await c.post(url, json={"query": query, "variables": variables},
+                                 headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"})
+                r.raise_for_status()
+                body = r.json()
+                if isinstance(body, dict) and body.get("errors"):
+                    first = body["errors"][0]
+                    raise ValueError(str(first.get("message") if isinstance(first, dict) else first)[:160])
+                return (body.get("data") or {}) if isinstance(body, dict) else {}
+
+            async def part(label, coro):
+                try:
+                    return await coro
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (401, 403) and label == "web":
+                        raise
+                    out["notes"].append(f"{label}: HTTP {e.response.status_code}")
+                except (httpx.HTTPError, ValueError) as e:
+                    out["notes"].append(f"{label}: {str(e)[:120] or type(e).__name__}")
+                return None
+
+            async def web_total(action):
+                d = await gql(_Q_WEB, {**span, "trafficUnit": "TRANSACTIONS", "actionFilter": action, "limit": 100})
+                return sum(e["total"] for e in _entries((d.get("WEB_TRAFFIC") or {}).get("no_grouping")))
+
+            allowed = await part("web", web_total("ALLOW"))
+            blocked = await part("web blocked", web_total("BLOCK"))
+            if allowed is not None or blocked is not None:
+                out["web"] = {"allowed": allowed, "blocked": blocked}
+
+            d = await part("threat categories", gql(_Q_THREATS, {**span, "trafficUnit": "TRANSACTIONS", "limit": 50}))
+            if d is not None:
+                out["threats"] = _entries((d.get("WEB_TRAFFIC") or {}).get("threat_super_categories"))
+            d = await part("firewall", gql(_Q_FW, {**span, "limit": 20}))
+            if d is not None:
+                out["firewall"] = _entries((d.get("ZERO_TRUST_FIREWALL") or {}).get("action"))
+
+            d = await part("app summary", gql(_Q_SUMMARY, span))
+            if d is not None:
+                sm = (d.get("SHADOW_IT") or {}).get("shadow_it_summary") or {}
+                out["totals"] = {"apps": sm.get("total_apps"), "bytes": sm.get("total_bytes"),
+                                 "upload": sm.get("total_upload_bytes"), "download": sm.get("total_download_bytes")}
+                cats = {}
+                for key, field in (("apps", "group_by_app_cat_for_app"), ("users", "group_by_app_cat_for_user_count"),
+                                   ("bytes", "group_by_app_cat_for_total_bytes")):
+                    for e in _entries(sm.get(field)):
+                        cats.setdefault(e["name"], {"name": e["name"], "apps": None, "users": None, "bytes": None})[key] = e["total"]
+                out["app_categories"] = sorted(cats.values(), key=lambda x: -(x["bytes"] or 0))
+            d = await part("applications", gql(_Q_APPS, {**span, "limit": 200}))
+            if d is not None:
+                rows = ((d.get("SHADOW_IT") or {}).get("apps") or {}).get("entries") or []
+                apps = [{"name": str(a.get("application") or ""), "category": str(a.get("application_category") or ""),
+                         "state": str(a.get("sanctioned_state") or ""), "risk": a.get("risk_index"),
+                         "bytes": a.get("data_consumed"), "upload": a.get("data_uploaded"),
+                         "download": a.get("data_downloaded"), "users": a.get("authenticated_users"),
+                         "last": a.get("last_access_time")} for a in rows if isinstance(a, dict)]
+                out["apps"] = sorted(apps, key=lambda a: -(a["bytes"] or 0))[:200]
+
+            # URL categories are not a documented grouping. Ask the API what it offers and use a
+            # category grouping only if one exists; otherwise the page says it is unavailable.
+            async def url_categories():
+                types = await gql(_Q_TYPES, {})
+                web = next((f for f in types["__schema"]["queryType"]["fields"] if f["name"] == "WEB_TRAFFIC"), None)
+                tname = (web["type"].get("name") or (web["type"].get("ofType") or {}).get("name")) if web else None
+                if not tname:
+                    return
+                fields = (await gql(_Q_FIELDS, {"n": tname}))["__type"]["fields"]
+                cand = next((f for f in fields if "categor" in f["name"].lower() and "threat" not in f["name"].lower()), None)
+                if not cand:
+                    return
+                args = {a["name"] for a in cand.get("args") or []}
+                if not {"start_time", "end_time"} <= args:
+                    return
+                decl, call, base_vars = ["$startTime: Long!", "$endTime: Long!", "$limit: Int"], ["start_time: $startTime", "end_time: $endTime"], dict(span, limit=200)
+                if "traffic_unit" in args:
+                    decl.append("$trafficUnit: WebTrafficUnits!"); call.append("traffic_unit: $trafficUnit"); base_vars["trafficUnit"] = "TRANSACTIONS"
+                split = "action_filter" in args
+                if split:
+                    decl.append("$actionFilter: ActionStatus"); call.append("action_filter: $actionFilter")
+                q = f"query({', '.join(decl)}) {{ WEB_TRAFFIC {{ {cand['name']}({', '.join(call)}) {{ entries(limit: $limit) {{ name total }} }} }} }}"
+                rows = {}
+                for action in (("ALLOW", "BLOCK") if split else (None,)):
+                    v = dict(base_vars, actionFilter=action) if split else base_vars
+                    for e in _entries(((await gql(q, v)).get("WEB_TRAFFIC") or {}).get(cand["name"])):
+                        row = rows.setdefault(e["name"], {"name": e["name"], "allowed": None, "blocked": None, "total": None})
+                        row["allowed" if action == "ALLOW" else "blocked" if action == "BLOCK" else "total"] = e["total"]
+                out["url_categories"] = sorted(rows.values(), key=lambda r: -((r["allowed"] or 0) + (r["blocked"] or 0) + (r["total"] or 0)))[:200]
+                out["url_categories_field"] = cand["name"]
+
+            try:
+                await url_categories()
+            except Exception:  # noqa: BLE001 - optional discovery; absence is reported in the UI
+                pass
+            if out["web"] is None and out["apps"] is None and out["totals"] is None:
+                out.update(ok=False, error="; ".join(out["notes"]) or "No analytics data returned")
+    except Exception as e:  # noqa: BLE001
+        out.update(ok=False, error=_err(e))
     return out
 
 

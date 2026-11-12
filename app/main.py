@@ -16,7 +16,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 LABELS = {"snmp": "SNMP", "unifi": "UniFi", "proxmox": "Proxmox", "firewalla": "Firewalla", "zia": "ZIA", "zpa": "ZPA",
           "zdx": "ZDX", "aiguard": "AI Security", "ztw": "Zero Trust Branch"}
 
-state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": [], "endpoints": [], "zdx_users": {}}
+state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": [], "endpoints": [], "zdx_users": {}, "zs_insights": {}}
 _prev_counters = {}
 _alert_since = {}
 _wake = asyncio.Event()
@@ -187,6 +187,9 @@ async def zdx_users_loop():
                 cur = state["zdx_users"].get(key)
                 if not cur or time.time() - cur.get("updated", 0) > ttl:
                     state["zdx_users"][key] = await collectors.zdx_users(cfg, int(key))
+                cur = state["zs_insights"].get(key)
+                if not cur or time.time() - cur.get("updated", 0) > ttl:
+                    state["zs_insights"][key] = await collectors.zs_insights(cfg, int(key))
         except Exception as e:  # noqa: BLE001 - keep the loop alive
             print("zdx users refresh failed:", repr(e), flush=True)
         await asyncio.sleep(30)
@@ -269,7 +272,7 @@ def get_settings():
 @app.put("/api/settings", dependencies=[Depends(authed)])
 async def put_settings(body: dict = Depends(json_body)):
     cfg = store.save_config(store.merge_secrets(body, store.load_config()))
-    state["zdx_users"] = {}  # refetch with the new settings
+    state["zdx_users"], state["zs_insights"] = {}, {}  # refetch with the new settings
     _wake.set()
     return store.masked(cfg)
 
