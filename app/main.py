@@ -14,7 +14,7 @@ from . import collectors, store
 COOKIE = "nsm_session"
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 LABELS = {"snmp": "SNMP", "unifi": "UniFi", "proxmox": "Proxmox", "firewalla": "Firewalla", "zia": "ZIA", "zpa": "ZPA",
-          "zdx": "ZDX", "aiguard": "AI Security", "ztw": "Zero Trust Branch"}
+          "zdx": "ZDX", "aiguard": "AI Security", "ztw": "Branch Connector", "ztb": "Zero Trust Branch"}
 
 state = {"updated": 0, "interval": 60, "polling": False, "sources": {}, "alerts": [], "endpoints": [], "zdx_users": {}, "zs_insights": {}}
 _prev_counters = {}
@@ -28,7 +28,7 @@ def build_alerts(src):
     def add(sev, source, key, msg):
         found.append({"severity": sev, "source": LABELS[source], "key": f"{source}:{key}", "message": msg})
 
-    for name in ("unifi", "proxmox", "firewalla", "zia", "zpa", "zdx", "aiguard", "ztw"):
+    for name in ("unifi", "proxmox", "firewalla", "zia", "zpa", "zdx", "aiguard", "ztw", "ztb"):
         s = src.get(name, {})
         if s.get("configured") and not s.get("ok"):
             add("warning", name, "source", f"{LABELS[name]} could not be polled: {s.get('error') or 'unknown error'}")
@@ -80,6 +80,12 @@ def build_alerts(src):
         for v in g["vms"]:
             if not v["healthy"]:
                 add("warning", "ztw", f"{g['name']}:{v['name']}", f"Branch Connector {v['name']} is {v['status'].lower()}")
+    ztb = src.get("ztb", {})
+    for st in ztb.get("sites", []) if ztb.get("ok") else []:
+        for g in st["gateways"]:
+            if g["healthy"] is False:  # only when the API is unambiguous about it
+                add("critical", "ztb", f"{st['id']}:{g['id'] or g['name']}",
+                    f"Branch gateway {g['name'] or g['id']} at {st['name']} is {(g['state'] or g['health'] or 'unhealthy').lower()}")
     zdx = src.get("zdx", {})
     for a in zdx.get("apps", []) if zdx.get("ok") else []:
         if a["score"] is not None and a["score"] < 66:

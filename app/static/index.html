@@ -158,7 +158,7 @@ async function refresh(force) {
 /* ---------- layout ---------- */
 const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"], ["endpoints", "Endpoints"]]],
   ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"], ["firewalla", "Firewalla"]]],
-  ["Zscaler", [["zscaler", "Zscaler"]]],
+  ["Zscaler", [["zscaler", "Zscaler"], ["ztb", "Zero Trust Branch"]]],
   ["Admin", [["settings", "Settings & credentials"]]]];
 function navEl() {
   const n = state ? state.alerts.length : 0;
@@ -170,13 +170,13 @@ function navEl() {
       $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
 }
 function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
-const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", settings: "Settings & credentials"};
+const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", ztb: "Zero Trust Branch", settings: "Settings & credentials"};
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
   const keep = {}; document.querySelectorAll(".tree").forEach(t => { keep[t.id] = t.scrollLeft; });
   const act = document.activeElement, actId = act && act.id, caret = act && act.tagName === "INPUT" ? act.selectionStart : null;
-  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, settings: vSettings}[view]();
+  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, ztb: vZtb, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
@@ -214,6 +214,7 @@ function vOverview() {
     srcTile("zia", "#zscaler", "ZIA", s => tile("#zscaler", "ZIA", s.url_rules == null ? dash : s.url_rules, "URL rules", s.status === "ACTIVE" ? "● Config active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn")),
     srcTile("zpa", "#zscaler", "ZPA", s => { const h = s.connectors.filter(c => c.healthy).length; return tile("#zscaler", "ZPA", s.segments == null ? dash : s.segments, "app segments", (h === s.connectors.length ? "● " : "▲ ") + h + " of " + s.connectors.length + " connectors healthy", h === s.connectors.length ? "ok" : "warn"); }),
     srcTile("zdx", "#zscaler", "ZDX score", s => tile("#zscaler", "ZDX score", s.score == null ? dash : s.score, "/ 100", s.score == null ? "No scored apps" : s.score >= 66 ? "● Good" : s.score >= 34 ? "▲ Okay" : "✕ Poor", s.score == null ? "mute" : s.score >= 66 ? "ok" : s.score >= 34 ? "warn" : "crit")),
+    srcTile("ztb", "#ztb", "Zero Trust Branch", s => { const g = s.sites.reduce((a, x) => a.concat(x.gateways), []), bad = g.filter(x => x.healthy === false).length; return tile("#ztb", "Zero Trust Branch", s.devices_total, "devices", g.length ? (bad ? "✕ " + bad + " of " + g.length + " gateways down" : "● " + g.length + " gateway" + (g.length === 1 ? "" : "s") + " reporting") : s.sites.length + " site" + (s.sites.length === 1 ? "" : "s"), bad ? "crit" : g.length ? "ok" : "mute"); }),
     srcTile("aiguard", "#zscaler", "AI Security", s => tile("#zscaler", "AI Security", s.policies, "policies", (s.applications == null ? dash : s.applications) + " LLM applications")));
   return [tiles,
     $("div", {class: "row"},
@@ -454,11 +455,11 @@ function zscalerTopology() {
           children: byDc("zpa:" + g, groups[g], c => c.broker, c => ({name: c.name, sub: (c.enabled ? c.status : "Disabled") + (c.public_ip ? " · " + c.public_ip : ""), ok: c.enabled ? c.healthy : null}))}))}); } else kids.push(fail("zpa", "ZPA")); }
   const ztw = src("ztw");
   if (ztw.configured) { if (ztw.ok) { const n = ztw.groups.reduce((t, g) => t + g.vms.length, 0);
-      kids.push({id: "ztw", kind: "cloud", title: "Zero Trust Branch", sub: "Cloud & Branch Connector", lines: [ztw.groups.length + " groups", n + " connectors"],
+      kids.push({id: "ztw", kind: "cloud", title: "Branch Connector", sub: "Cloud & Branch Connector", lines: [ztw.groups.length + " groups", n + " connectors"],
         children: ztw.groups.map(g => { const leaf = v => ({name: v.name, sub: v.status + (v.nat_ip ? " · " + v.nat_ip : ""), ok: v.healthy});
           return {id: "ztw:" + g.name, kind: "switch", title: g.name, sub: "Connector group" + (g.location ? " · " + g.location : ""), lines: [g.platform, g.vms.filter(v => v.healthy).length + " of " + g.vms.length + " healthy"],
             children: byDc("ztw:" + g.name + ":zia", g.vms.filter(v => v.zia_gateway), v => "ZIA · " + v.zia_gateway, leaf).concat(byDc("ztw:" + g.name + ":zpa", g.vms.filter(v => v.zpa_broker), v => "ZPA · " + v.zpa_broker, leaf))
-              .concat(g.vms.some(v => !v.zia_gateway && !v.zpa_broker) ? byDc("ztw:" + g.name + ":none", g.vms.filter(v => !v.zia_gateway && !v.zpa_broker), v => "", leaf) : [])}; })}); } else kids.push(fail("ztw", "Zero Trust Branch")); }
+              .concat(g.vms.some(v => !v.zia_gateway && !v.zpa_broker) ? byDc("ztw:" + g.name + ":none", g.vms.filter(v => !v.zia_gateway && !v.zpa_broker), v => "", leaf) : [])}; })}); } else kids.push(fail("ztw", "Branch Connector")); }
   if (zdx.configured) kids.push(zdx.ok ? {id: "zdx", kind: "cloud", title: "ZDX", sub: "Digital Experience", lines: [zdx.score != null && "Average score " + zdx.score, zdx.alerts != null && zdx.alerts + " ongoing alerts"], leafTitle: "Applications", leaves: zdx.apps.map(a => ({name: a.name, sub: a.score == null ? "No score" : "Score " + a.score, ok: a.score == null ? null : a.score >= 66}))} : fail("zdx", "ZDX"));
   if (ai.configured) kids.push(ai.ok ? {id: "ai", kind: "cloud", title: "AI Security", sub: "AI Guard", lines: [ai.providers != null && ai.providers + " LLM providers", ai.applications != null && ai.applications + " LLM applications"], leafTitle: "Detection policies", leaves: ai.policy_names.map(n => ({name: n}))} : fail("ai", "AI Security"));
   if (!kids.length) return null;
@@ -579,7 +580,7 @@ function zsPanels() {
     zsPanel("zia", "ZIA · Internet Access", s => [kv("Configuration", s.status === "ACTIVE" ? "Active" : "▲ " + (s.status || "Unknown").toLowerCase(), s.status === "ACTIVE" ? "ok" : "warn"), kv("GRE tunnels", s.gre == null ? null : s.gre.length), kv("IPSec VPN credentials", s.vpn == null ? null : s.vpn.length), kv("Locations", s.locations), kv("URL filtering rules", s.url_rules), kv("Firewall rules", s.fw_rules)]),
     zsPanel("zpa", "ZPA · Private Access", s => { const h = s.connectors.filter(c => c.healthy).length; return [kv("App Connectors", (h === s.connectors.length ? "" : "▲ ") + h + " of " + s.connectors.length + " healthy", h === s.connectors.length ? "" : "warn"), kv("App segments", s.segments)]; }),
     zsPanel("zdx", "ZDX · Digital Experience", s => [kv("Average app score", s.score == null ? null : s.score + " / 100"), kv("Monitored apps", s.apps.length), kv("Ongoing alerts", s.alerts)]),
-    zsPanel("ztw", "Zero Trust Branch", s => { const vms = s.groups.reduce((a, g) => a.concat(g.vms), []), h = vms.filter(v => v.healthy).length; return [kv("Connector groups", s.groups.length), kv("Connectors", (h === vms.length ? "" : "▲ ") + h + " of " + vms.length + " healthy", h === vms.length ? "" : "warn")]; }),
+    zsPanel("ztw", "Cloud & Branch Connector", s => { const vms = s.groups.reduce((a, g) => a.concat(g.vms), []), h = vms.filter(v => v.healthy).length; return [kv("Connector groups", s.groups.length), kv("Connectors", (h === vms.length ? "" : "▲ ") + h + " of " + vms.length + " healthy", h === vms.length ? "" : "warn")]; }),
     zsPanel("aiguard", "AI Security · AI Guard", s => [kv("Detection policies", s.policies), kv("LLM providers", s.providers), kv("LLM applications", s.applications)]));
 }
 function vZscaler() {
@@ -599,7 +600,7 @@ function vZscaler() {
     $("thead", null, $("tr", null, ["Connector", "Group", "Status", "Data center", "Public IP", "Version"].map(h => $("th", null, h)))),
     $("tbody", null, zpa.connectors.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", null, c.group || dash), $("td", {class: !c.enabled ? "mute" : c.healthy ? "ok" : "warn"}, !c.enabled ? "○ Disabled" : (c.healthy ? "● " : "▲ ") + c.status), $("td", null, c.broker || dash), $("td", {class: "mono mute"}, c.public_ip || dash), $("td", {class: "mono mute"}, c.version || dash))))))));
   const ztw = src("ztw");
-  if (ztw.ok && ztw.groups.some(g => g.vms.length)) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Zero Trust Branch connectors")), $("div", {class: "scroll"}, $("table", null,
+  if (ztw.ok && ztw.groups.some(g => g.vms.length)) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Cloud & Branch Connectors")), $("div", {class: "scroll"}, $("table", null,
     $("thead", null, $("tr", null, ["Connector", "Group", "Status", "ZIA data center", "ZPA data center", "NAT IP", "Version"].map(h => $("th", null, h)))),
     $("tbody", null, ztw.groups.map(g => g.vms.map(v => $("tr", null, $("td", {style: "font-weight:500"}, v.name), $("td", null, g.name), $("td", {class: v.healthy ? "ok" : "warn"}, (v.healthy ? "● " : "▲ ") + v.status), $("td", null, v.zia_gateway || dash), $("td", null, v.zpa_broker || dash), $("td", {class: "mono mute"}, v.nat_ip || dash), $("td", {class: "mono mute"}, v.version || dash)))))))));
   if (zdx.ok && zdx.apps.length) out.push($("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "ZDX application scores")), $("div", {class: "scroll"}, $("table", null,
@@ -607,6 +608,107 @@ function vZscaler() {
     $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
   out.push(aiPolicies() || (ai.ok && ai.policy_names.length ? $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))) : null));
   return out;
+}
+
+/* ---------- Zero Trust Branch ---------- */
+const zb = {site: "", q: "", sel: ""};
+function ztbSnmpFor(g) {
+  const norm = x => String(x || "").toLowerCase().split(".")[0], ips = [g.ip, g.mgmt_ip, g.vm_ip, g.public_ip].filter(Boolean);
+  return (src("snmp").devices || []).find(d => ips.includes(d.host) || (g.name && (norm(d.sys_name) === norm(g.name) || norm(d.name) === norm(g.name)))) || null;
+}
+function gwState(g) {
+  const text = g.state || (g.health ? g.health.charAt(0).toUpperCase() + g.health.slice(1) : "Unknown");
+  return $("span", {class: g.healthy === true ? "ok" : g.healthy === false ? "crit" : "mute"}, (g.healthy === true ? "● " : g.healthy === false ? "✕ " : "○ ") + text);
+}
+function ztbPerformance(gws) {
+  const util = (rate, speed) => rate == null || !speed ? null : Math.min(100, Math.round(1000 * rate / speed) / 10);
+  const cards = gws.map(({g, site, d}) => {
+    if (!d) return $("div", {class: "inset"}, $("div", {style: "font-weight:600"}, g.name || g.id || "Gateway"), $("div", {class: "mute", style: "font-size:12px;margin-bottom:8px"}, site.name),
+      $("div", {class: "mute"}, "No SNMP device matches this gateway. Add it under SNMP devices using " + ([g.mgmt_ip, g.ip, g.vm_ip].filter(Boolean).join(" or ") || "its management address") + "."));
+    const sp = d.uplink_speed_bps, ui = util(d.in_bps, sp), uo = util(d.out_bps, sp);
+    return $("div", {class: "inset"}, $("div", {style: "font-weight:600"}, g.name || d.name), $("div", {class: "mute", style: "font-size:12px;margin-bottom:8px"}, site.name + " · SNMP " + d.host),
+      !d.up ? $("div", {class: "crit"}, "✕ " + (d.error || "Not responding to SNMP")) : [
+        kv("Uplink", d.uplink_name ? d.uplink_name + (d.uplink_auto ? " (busiest)" : "") : null), kv("Link speed", sp ? bps(sp) : null),
+        kv("Traffic in", d.in_bps == null ? "measuring…" : bps(d.in_bps)), kv("Traffic out", d.out_bps == null ? "measuring…" : bps(d.out_bps)),
+        $("div", {style: "display:flex;flex-direction:column;gap:10px;font-size:12px;margin-top:10px"}, meter("Utilization in", ui), meter("Utilization out", uo), meter("CPU", d.cpu)),
+        kv("Uptime", dur(d.uptime_s))]);
+  });
+  const matched = gws.filter(x => x.d && x.d.up && (x.d.interfaces || []).length);
+  return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Performance · bandwidth utilization"), $("span", {class: "mute"}, "From SNMP on each branch appliance")),
+    gws.length ? $("div", {class: "grid4"}, cards) : $("div", {class: "empty"}, "No gateways reported for " + (zb.site ? "this site" : "these sites") + " yet."),
+    matched.map(({g, d}) => [$("div", {style: "font-weight:600;margin:16px 0 8px"}, "Interfaces on " + (g.name || d.name)),
+      $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Interface", "In", "Out", "Link speed", "Utilization in", "Utilization out"].map(h => $("th", null, h)))),
+        $("tbody", null, d.interfaces.slice(0, 16).map(i => { const a = util(i.in_bps, i.speed_bps), b = util(i.out_bps, i.speed_bps), cell = v => $("td", {class: "mono " + (v >= 85 ? "warn" : "")}, v == null ? dash : (v >= 85 ? "▲ " : "") + v + "%");
+          return $("tr", null, $("td", {style: "font-weight:500"}, i.name), $("td", {class: "mono"}, bps(i.in_bps)), $("td", {class: "mono"}, bps(i.out_bps)), $("td", {class: "mono mute"}, i.speed_bps ? bps(i.speed_bps) : dash), cell(a), cell(b)); }))))]),
+    $("p", {class: "note"}, "Utilization is traffic as a share of the interface’s reported link speed, measured between the last two polls. The Zero Trust Branch API does not report bandwidth, so appliances without SNMP show no figures."));
+}
+function vZtb() {
+  const bad = notReady("ztb", "Zero Trust Branch"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("ztb");
+  if (zb.site && !s.sites.some(x => x.id === zb.site)) zb.site = "";
+  const sites = zb.site ? s.sites.filter(x => x.id === zb.site) : s.sites, names = sites.map(x => x.name);
+  const gws = sites.reduce((a, site) => a.concat(site.gateways.map(g => ({g: g, site: site, d: ztbSnmpFor(g)}))), []);
+  const devs = zb.site ? s.devices.filter(d => d.site_id === zb.site) : s.devices;
+  const users = zb.site ? s.users.filter(u => u.sites.some(n => names.includes(n))) : s.users;
+  const alarms = s.alarms == null ? null : zb.site ? s.alarms.filter(a => names.includes(a.site)) : s.alarms;
+  const live = gws.filter(x => x.d && x.d.up && x.d.in_bps != null), down = gws.filter(x => x.g.healthy === false).length, quar = devs.filter(d => d.quarantined).length;
+  const sum = k => live.reduce((t, x) => t + x.d[k], 0);
+  const box = (k, v, unit, sub, cls) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v, unit && $("small", null, " " + unit)), $("div", {class: "s " + (cls || "mute")}, sub || " "));
+  const tiles = $("section", {class: "tiles", "aria-label": "Zero Trust Branch totals"},
+    box("Sites", sites.length, "", s.sites.length > sites.length ? "of " + s.sites.length : "Tenant " + s.tenant),
+    box("Gateways", gws.length, "", !gws.length ? "None reported" : down ? "✕ " + down + " down" : "● None reported down", !gws.length ? "mute" : down ? "crit" : "ok"),
+    box("Devices", devs.length, "", quar ? "▲ " + quar + " quarantined" : "None quarantined", quar ? "warn" : "mute"),
+    box("Users", users.length, "", "Signed in on branch devices"),
+    box("Alarms", alarms == null ? dash : alarms.length, "", alarms == null ? "Not available" : alarms.length ? "▲ Review below" : "● None", alarms == null ? "mute" : alarms.length ? "warn" : "ok"),
+    box("Bandwidth in", live.length ? bps(sum("in_bps")) : dash, "", live.length ? "Out " + bps(sum("out_bps")) + " · SNMP on " + live.length + " of " + gws.length + " gateways" : "No SNMP data yet"));
+  const picker = s.sites.length > 1 ? $("section", {class: "card"}, $("label", {for: "zbsite", style: "max-width:360px"}, "Branch site", $("select", {id: "zbsite", onchange: ev => { zb.site = ev.target.value; zb.sel = ""; render(); }},
+    $("option", {value: "", selected: !zb.site}, "All sites (" + s.sites.length + ")"), s.sites.map(x => $("option", {value: x.id, selected: zb.site === x.id}, x.name))))) : null;
+  const branch = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Branch sites and gateways")),
+    $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Site", "Site status", "Gateway", "State", "HA role", "Version", "Management IP", "Public IP", "Serial", "Devices"].map(h => $("th", null, h)))),
+      $("tbody", null, sites.map(site => { const n = s.devices.filter(d => d.site_id === site.id).length, rows = site.gateways.length ? site.gateways : [null];
+        return rows.map((g, i) => $("tr", null, $("td", {style: "font-weight:500"}, i ? "" : site.name, !i && site.type ? $("span", {class: "mute"}, "  " + site.type) : null), $("td", null, i ? "" : site.status || dash),
+          g ? [$("td", {style: "font-weight:500"}, g.name || g.id || dash), $("td", null, gwState(g)), $("td", null, g.ha || dash), $("td", {class: "mono mute"}, g.version || dash), $("td", {class: "mono mute"}, g.mgmt_ip || g.ip || dash), $("td", {class: "mono mute"}, g.public_ip || site.public_ip || dash), $("td", {class: "mono mute"}, g.serial || dash)]
+            : [$("td", {class: "mute", colspan: "7"}, "No gateway detail reported")], $("td", {class: "mono"}, i ? "" : n))); })))),
+    s.notes.length ? $("p", {class: "note"}, "Not available from your tenant: " + s.notes.join("; ") + ".") : null);
+
+  /* users: directory users Zero Trust Branch saw on devices; else ZDX users at a matching Zscaler location */
+  const zdx = ((state.zdx_users || {})["24"] || {}).users || [], low = names.map(n => n.toLowerCase());
+  const zdxHere = users.length ? [] : zdx.filter(u => u.devices.some(x => x.locations.some(l => low.includes(String(l).toLowerCase()))));
+  const userCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Users"), $("span", {class: "mute"}, users.length ? users.length + " signed in on branch devices" : "")),
+    users.length ? simpleTable(["User", "Devices", "Device names", "Site", "Last seen"], users.slice(0, 300).map(u => [u.name, String(u.devices.length), $("td", {style: "white-space:normal;min-width:220px"}, u.devices.slice(0, 6).join(", ") + (u.devices.length > 6 ? " +" + (u.devices.length - 6) : "")), u.sites.join(", ") || dash, $("td", {class: "mono mute"}, u.last_seen ? ago(u.last_seen) + " ago" : dash)]))
+      : [$("div", {class: "empty"}, "Zero Trust Branch reported no signed-in users on these devices. It lists users only for devices it can tie to a directory account."),
+        zdxHere.length ? [$("div", {style: "font-weight:600;margin:6px 0 8px"}, "ZDX users at a Zscaler location with the same name · last 24 hours (" + zdxHere.length + ")"),
+          simpleTable(["User", "Email", "Devices"], zdxHere.slice(0, 200).map(u => [u.name || u.email, u.email || dash, String(u.devices.length)]))] : null]);
+
+  const q = zb.q.trim().toLowerCase(), max = 300;
+  const list = devs.filter(d => !q || [d.name, d.ip, d.mac, d.type, d.vendor, d.network, d.site, d.status].concat(d.users, d.tags, d.groups).some(x => String(x || "").toLowerCase().includes(q)));
+  const types = {}; devs.forEach(d => { types[d.type || "Unclassified"] = (types[d.type || "Unclassified"] || 0) + 1; });
+  const sel = devs.find(d => (d.id || d.mac) === zb.sel);
+  const detail = sel && $("div", {class: "inset", style: "margin-bottom:14px"}, $("div", {class: "head"}, $("strong", null, sel.name), $("button", {type: "button", onclick: () => { zb.sel = ""; render(); }}, "Close")),
+    $("div", {class: "grid4"},
+      $("div", null, kv("IP address", sel.ip || null), kv("MAC address", sel.mac || null), kv("Type", sel.type || null), kv("Vendor", sel.vendor || null)),
+      $("div", null, kv("Site", sel.site || null), kv("Network", sel.network || null), kv("Users", sel.users.join(", ") || null), kv("Groups", sel.groups.join(", ") || null)),
+      $("div", null, kv("Status", sel.status || null), kv("Protection", sel.protection || null), kv("Posture score", sel.posture), kv("Quarantined", sel.quarantined ? "Yes" : "No", sel.quarantined ? "crit" : ""), kv("Tags", sel.tags.join(", ") || null), kv("Last seen", sel.last_seen ? ago(sel.last_seen) + " ago" : null))),
+    sel.status_error ? $("div", {class: "warn", style: "margin-top:8px"}, "▲ " + sel.status_error) : null);
+  const deviceCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Devices"), $("span", {class: "mute"}, s.devices_total >= 2000 ? "First 2000 loaded" : "")),
+    Object.keys(types).length ? $("div", {class: "chips", style: "margin-bottom:12px"}, Object.keys(types).sort((a, b) => types[b] - types[a]).slice(0, 12).map(t => chipEl({name: types[t] + " · " + t}))) : null,
+    detail,
+    $("label", {for: "zbq", style: "max-width:420px;margin-bottom:10px"}, "Search name, IP, MAC, type, user, network", $("input", {id: "zbq", type: "search", value: zb.q, autocomplete: "off", spellcheck: "false", oninput: ev => { zb.q = ev.target.value; render(); }})),
+    $("div", {class: "mute", role: "status", style: "margin-bottom:6px"}, list.length + " of " + devs.length + " devices" + (list.length > max ? ", showing the first " + max : "")),
+    list.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Device", "IP address", "MAC address", "Type", "User", "Site", "Network", "Status", "Posture", "Last seen"].map(h => $("th", null, h)))),
+      $("tbody", null, list.slice(0, max).map(d => { const id = d.id || d.mac; return $("tr", null,
+        $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (zb.sel === id ? ";border-color:var(--accent)" : ""), "aria-pressed": zb.sel === id ? "true" : "false", onclick: () => { zb.sel = zb.sel === id ? "" : id; render(); }}, d.name || d.mac || dash), d.vendor ? $("span", {class: "mute"}, "  " + d.vendor) : null),
+        $("td", {class: "mono"}, d.ip || dash), $("td", {class: "mono mute"}, d.mac || dash), $("td", null, d.type || dash), $("td", null, d.users.join(", ") || dash), $("td", null, d.site || dash), $("td", null, d.network || dash),
+        $("td", {class: d.quarantined ? "crit" : ""}, d.quarantined ? "✕ Quarantined" : d.status || dash), $("td", {class: "mono"}, d.posture == null ? dash : d.posture), $("td", {class: "mono mute"}, d.last_seen ? ago(d.last_seen) + " ago" : dash)); })))) : $("div", {class: "empty"}, devs.length ? "No devices match." : "No devices reported."));
+
+  const sev = a => /crit|high|major|emerg/i.test(a.severity) ? "crit" : /warn|med|minor/i.test(a.severity) ? "warn" : "mute";
+  const alarmCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Telemetry · alarms"), alarms && s.alarms.length >= 100 ? $("span", {class: "mute"}, "Newest 100") : null),
+    alarms == null ? $("div", {class: "empty"}, "Alarms could not be read from this tenant.")
+      : alarms.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["When", "Severity", "Alarm", "Service", "Site", "Gateway", "Status"].map(h => $("th", null, h)))),
+        $("tbody", null, alarms.map(a => $("tr", null, $("td", {class: "mono mute"}, a.ts ? ago(a.ts) + " ago" : dash), $("td", {class: sev(a), style: "font-weight:600"}, a.severity || dash),
+          $("td", {style: "white-space:normal;min-width:280px"}, a.message || dash, a.action ? $("div", {class: "mute"}, a.action) : null), $("td", null, a.service || dash), $("td", null, a.site || dash), $("td", null, a.gateway || dash), $("td", null, a.status || dash))))))
+        : $("div", {class: "empty"}, "No alarms."));
+  return [tiles, picker, branch, ztbPerformance(gws), alarmCard, userCard, deviceCard];
 }
 
 /* ---------- settings ---------- */
@@ -680,7 +782,9 @@ function renderSettings() {
       $("div", {class: "form"}, field(S.firewalla, "enabled", "Enabled", {type: "checkbox"}), field(S.firewalla, "domain", "MSP domain", {placeholder: "mydomain.firewalla.net"}), field(S.firewalla, "token", "Personal access token", pw))),
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
-      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Zero Trust Branch", {type: "checkbox"}), field(S.zscaler, "zins", "Analytics (Z-Insights)", {type: "checkbox"}))),
+      $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Cloud & Branch Connector", {type: "checkbox"}), field(S.zscaler, "zins", "Analytics (Z-Insights)", {type: "checkbox"}))),
+    $("section", {class: "card"}, $("h2", null, "Zscaler Zero Trust Branch"), $("p", {class: "note"}, "Zero Trust Branch (formerly Airgap) has its own API, separate from the OneAPI client above. Create an API key in the Zero Trust Branch portal. The tenant is the first part of the API address, for example acme-api in acme-api.goairgap.com. Bandwidth comes from SNMP: add each branch appliance under SNMP devices."),
+      $("div", {class: "form"}, field(S.ztb, "enabled", "Enabled", {type: "checkbox"}), field(S.ztb, "cloud", "Tenant (before .goairgap.com)", {placeholder: "acme-api"}), field(S.ztb, "api_key", "API key", pw))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }

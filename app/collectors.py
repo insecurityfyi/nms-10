@@ -1,10 +1,11 @@
-"""Read-only collectors for SNMP, UniFi, Proxmox VE and Zscaler (OneAPI)."""
+"""Read-only collectors for SNMP, UniFi, Proxmox VE, Firewalla and Zscaler (OneAPI and Zero Trust Branch)."""
 import asyncio
 import hashlib
 import ipaddress
 import re
 import shutil
 import time
+from datetime import datetime
 
 import httpx
 
@@ -66,7 +67,7 @@ def _num(s):
 async def snmp_device(dev, prev):
     res = {"id": dev["id"], "name": dev["name"], "host": dev["host"], "up": False, "sys_name": "",
            "uptime_s": None, "cpu": None, "in_bps": None, "out_bps": None,
-           "uplink_name": "", "uplink_auto": False, "interfaces": [], "neighbors": [], "error": ""}
+           "uplink_name": "", "uplink_auto": False, "uplink_speed_bps": None, "interfaces": [], "neighbors": [], "error": ""}
     host = dev["host"]
     if not HOST_RE.match(host):
         res["error"] = "Invalid host"
@@ -144,7 +145,13 @@ async def _traffic(dev, host, prev, res):
     names = p.get("names") or {}
     if not names:
         names = await _walk(dev, host, "1.3.6.1.2.1.31.1.1.1.1") or await _walk(dev, host, "1.3.6.1.2.1.2.2.1.2")
-    prev[dev["id"]] = {"t": now, "counters": counters, "names": names}
+    # ifHighSpeed (Mbps), read once per device and cached; empty if the agent has no ifXTable speeds
+    speeds = p["speeds"] if "speeds" in p else await _walk(dev, host, "1.3.6.1.2.1.31.1.1.1.15")
+    prev[dev["id"]] = {"t": now, "counters": counters, "names": names, "speeds": speeds}
+
+    def speed(i):
+        n = _num(speeds.get(i, ""))
+        return n * 1_000_000 if n else None
     old, dt = p.get("counters") or {}, now - p.get("t", now)
     if dt <= 0:
         return
@@ -162,8 +169,9 @@ async def _traffic(dev, host, prev, res):
         pick, auto = max(cands, key=lambda i: sum(cands[i])), True
     top = sorted(rates, key=lambda i: sum(rates[i]), reverse=True)[:32]
     res["interfaces"] = [{"idx": i, "name": names.get(i) or ("ifIndex " + i),
-                          "in_bps": round(rates[i][0]), "out_bps": round(rates[i][1])} for i in top]
+                          "in_bps": round(rates[i][0]), "out_bps": round(rates[i][1]), "speed_bps": speed(i)} for i in top]
     res["in_bps"], res["out_bps"] = round(rates[pick][0]), round(rates[pick][1])
+    res["uplink_speed_bps"] = speed(pick)
     res["uplink_name"], res["uplink_auto"] = names.get(pick) or ("ifIndex " + pick), auto
 
 
@@ -933,8 +941,213 @@ async def collect_zscaler(cfg):
     return out
 
 
+# ---- Zscaler Zero Trust Branch (former Airgap; API key, read-only calls) ----
+# Not part of OneAPI: sign in with the tenant's API key at https://<tenant>.goairgap.com
+# (POST /api/v3/api-key-auth/login -> result.delegate_token), then send it as a Bearer token.
+# Every data call below is a GET.
+
+_ztb_tokens = {}
+ZTB_MAX_SITES, ZTB_MAX_DEVICES = 20, 2000
+
+
+def _ztb_base(cloud):
+    return f"https://{cloud}.goairgap.com"
+
+
+def _ztb_items(body):
+    """List responses arrive as {"result": {"<name>": [...]}}, {"result": [...]} or {"rows": [...]}."""
+    if isinstance(body, list):
+        return body
+    if not isinstance(body, dict):
+        return []
+    res = body.get("result")
+    if isinstance(res, list):
+        return res
+    for node in (res, body):
+        if isinstance(node, dict):
+            for v in node.values():
+                if isinstance(v, list):
+                    return v
+    return []
+
+
+def _ts(value):
+    """Epoch seconds from epoch seconds, epoch milliseconds or an ISO timestamp; else None."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 1e11 else value
+    text = str(value).strip()
+    try:
+        if re.fullmatch(r"[0-9.]+", text):
+            return _ts(float(text))
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _names(value):
+    """A field that may be a string, a comma-separated string, or a list of strings or objects."""
+    if isinstance(value, str):
+        value = value.split(",")
+    out = []
+    for v in value if isinstance(value, list) else []:
+        if isinstance(v, dict):
+            v = v.get("name") or v.get("username") or v.get("user") or v.get("display_name") or ""
+        v = str(v or "").strip()
+        if v and v not in out:
+            out.append(v[:120])
+    return out
+
+
+async def _ztb_login(c, base, api_key, key):
+    r = await c.post(base + "/api/v3/api-key-auth/login", json={"api_key": api_key},
+                     headers={"Accept": "application/json"})
+    r.raise_for_status()
+    body = r.json()
+    tok = (body.get("result") or {}).get("delegate_token") if isinstance(body, dict) and isinstance(body.get("result"), dict) else None
+    if not tok:
+        raise ValueError("Sign-in succeeded but no token was returned")
+    _ztb_tokens.clear()
+    _ztb_tokens[key] = (tok, time.time() + 1800)
+    return tok
+
+
+async def collect_ztb(cfg):
+    b = cfg["ztb"]
+    if not (b["enabled"] and b["cloud"] and b["api_key"]):
+        return {"configured": False}
+    if not (LABEL_RE.match(b["cloud"]) and b["cloud"]):
+        return {"configured": True, "ok": False,
+                "error": "Tenant should be the part before .goairgap.com, for example acme-api"}
+    base = _ztb_base(b["cloud"])
+    key = (b["cloud"], hashlib.sha256(b["api_key"].encode()).hexdigest())
+    out = {"configured": True, "ok": True, "error": "", "tenant": b["cloud"], "notes": [],
+           "sites": [], "devices": [], "devices_total": 0, "users": [], "alarms": None}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            try:
+                cached = _ztb_tokens.get(key)
+                state = {"tok": cached[0] if cached and cached[1] > time.time() else await _ztb_login(c, base, b["api_key"], key)}
+            except httpx.HTTPStatusError as e:
+                hint = " Check the API key." if e.response.status_code in (400, 401, 403) else ""
+                return {"configured": True, "ok": False, "error": "Sign-in failed: " + _err(e) + "." + hint}
+            except httpx.ConnectError as e:
+                return {"configured": True, "ok": False, "error":
+                        f"Sign-in failed: cannot reach {b['cloud']}.goairgap.com ({str(e)[:80]}). Check the tenant name."}
+
+            async def get(path, params=None):
+                for attempt in (0, 1):
+                    r = await c.get(base + path, params=params,
+                                    headers={"Authorization": "Bearer " + state["tok"], "Accept": "application/json"})
+                    if r.status_code == 401 and attempt == 0:  # token expired: sign in again, once
+                        state["tok"] = await _ztb_login(c, base, b["api_key"], key)
+                        continue
+                    r.raise_for_status()
+                    return r.json()
+
+            async def optional(label, coro):
+                try:
+                    return await coro
+                except httpx.HTTPStatusError as e:
+                    out["notes"].append(f"{label}: HTTP {e.response.status_code}")
+                except (httpx.HTTPError, ValueError) as e:
+                    out["notes"].append(f"{label}: {type(e).__name__}")
+                return None
+
+            # Sites, then each site's overview for its gateways (the branch appliances).
+            listed = [s for s in _ztb_items(await get("/api/v2/Site/", {"page": 1, "limit": 200})) if isinstance(s, dict)]
+            if len(listed) > ZTB_MAX_SITES:
+                out["notes"].append(f"gateway detail loaded for the first {ZTB_MAX_SITES} of {len(listed)} sites")
+
+            async def site(s, detailed):
+                sid = str(s.get("id") or "")
+                rec = {"id": sid, "name": str(s.get("display_name") or s.get("name") or sid),
+                       "status": str(s.get("site_status") or ""), "type": str(s.get("gateway_type") or ""),
+                       "public_ip": str(s.get("public_ip") or ""), "template": "", "gateways": []}
+                if not (detailed and sid):
+                    return rec
+                body = await optional(f"site {rec['name']}", get(f"/api/v2/Site/siteByID/{sid}/overview"))
+                ov = body.get("result") if isinstance(body, dict) and isinstance(body.get("result"), dict) else body
+                if not isinstance(ov, dict):
+                    return rec
+                rec["template"] = str(ov.get("template_name") or "")
+                rec["status"] = str(ov.get("site_status") or rec["status"])
+                for cl in ov.get("clusters") or []:
+                    for g in (cl.get("gateways") or []) if isinstance(cl, dict) else []:
+                        if not isinstance(g, dict):
+                            continue
+                        st, color = str(g.get("operational_state") or ""), str(g.get("health_color") or "").lower()
+                        bad = color == "red" or st.lower() in ("down", "offline", "inactive", "unreachable", "disconnected", "failed")
+                        good = color == "green" or st.lower() in ("up", "active", "online", "running", "connected", "healthy")
+                        rec["gateways"].append({
+                            "id": str(g.get("gateway_id") or ""), "name": str(g.get("gateway_name") or ""),
+                            "cluster": str(cl.get("cluster_name") or ""), "state": st, "health": color,
+                            # True/False only when the API is unambiguous; None means "not sure", never alerted on
+                            "healthy": False if bad else True if good else None,
+                            "version": str(g.get("running_version") or ""), "serial": str(g.get("system_serial_tag") or ""),
+                            "ha": str(g.get("vrrp_state") or ""), "region": str(g.get("region") or ""),
+                            "ip": str(g.get("gateway_ip_address") or ""), "mgmt_ip": str(g.get("mgmt_ip") or ""),
+                            "vm_ip": str(g.get("vm_ip_address") or ""), "public_ip": str(g.get("public_ip") or ""),
+                            "updated": _ts(g.get("updated_at"))})
+                return rec
+
+            out["sites"] = list(await asyncio.gather(*(site(s, i < ZTB_MAX_SITES) for i, s in enumerate(listed))))
+            site_names = {s["id"]: s["name"] for s in out["sites"]}
+
+            # Devices seen at the branches (and the directory users signed in on them).
+            async def devices():
+                rows, first = [], None
+                for page in range(1, ZTB_MAX_DEVICES // 200 + 1):
+                    got = [d for d in _ztb_items(await get("/api/v2/devices/active", {"page": page, "limit": 200})) if isinstance(d, dict)]
+                    ident = (got[0].get("id"), got[0].get("mac")) if got else None
+                    if not got or ident == first:  # empty page, or the API ignored `page` and repeated itself
+                        break
+                    first = first or ident
+                    rows += got
+                    if len(got) < 200:
+                        break
+                return rows
+
+            devs = await optional("devices", devices()) or []
+            out["devices_total"] = len(devs)
+            users = {}
+            for d in devs:
+                rec = {"id": str(d.get("id") or ""), "name": str(d.get("hostname") or d.get("ip_address") or d.get("mac") or "")[:120],
+                       "ip": str(d.get("ip_address") or ""), "mac": str(d.get("mac") or ""), "type": str(d.get("type") or ""),
+                       "vendor": str(d.get("vendor") or ""), "site_id": str(d.get("site_id") or ""),
+                       "site": site_names.get(str(d.get("site_id") or ""), ""),
+                       "network": str(d.get("network_display_name") or d.get("network_name") or ""),
+                       "status": str(d.get("status") or ""), "status_error": str(d.get("status_error") or "")[:160],
+                       "protection": str(d.get("protection") or ""), "posture": d.get("posture_score") if isinstance(d.get("posture_score"), (int, float)) else None,
+                       "quarantined": bool(d.get("is_quarantined")), "users": _names(d.get("ad_users")),
+                       "groups": _names(d.get("groups")), "tags": _names(d.get("tags")),
+                       "last_seen": _ts(d.get("last_timestamp") or d.get("updated_at"))}
+                out["devices"].append(rec)
+                for u in rec["users"]:
+                    x = users.setdefault(u.lower(), {"name": u, "devices": [], "sites": [], "last_seen": None})
+                    x["devices"].append(rec["name"])
+                    if rec["site"] and rec["site"] not in x["sites"]:
+                        x["sites"].append(rec["site"])
+                    if rec["last_seen"] and (x["last_seen"] or 0) < rec["last_seen"]:
+                        x["last_seen"] = rec["last_seen"]
+            out["users"] = sorted(users.values(), key=lambda u: u["name"].lower())
+
+            rows = await optional("alarms", get("/api/v2/alarm", {"page": 1, "size": 100}))
+            if rows is not None:
+                out["alarms"] = [{
+                    "id": str(a.get("alarmId") or ""), "ts": _ts(a.get("createdAt")), "severity": str(a.get("severity") or ""),
+                    "status": str(a.get("status") or ""), "service": str(a.get("service") or ""),
+                    "message": str(a.get("description") or "")[:240], "action": str(a.get("recommendedAction") or "")[:240],
+                    "site": str(a.get("siteName") or ""), "gateway": str(a.get("gatewayName") or ""),
+                    "network": str(a.get("networkName") or "")} for a in _ztb_items(rows)[:100] if isinstance(a, dict)]
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "ok": False, "error": _err(e)}
+
+
 async def collect_all(cfg, prev):
-    snmp, unifi, proxmox, firewalla, zs = await asyncio.gather(
+    snmp, unifi, proxmox, firewalla, zs, ztb = await asyncio.gather(
         collect_snmp(cfg, prev), collect_unifi(cfg), collect_proxmox(cfg), collect_firewalla(cfg),
-        collect_zscaler(cfg))
-    return {"snmp": snmp, "unifi": unifi, "proxmox": proxmox, "firewalla": firewalla, **zs}
+        collect_zscaler(cfg), collect_ztb(cfg))
+    return {"snmp": snmp, "unifi": unifi, "proxmox": proxmox, "firewalla": firewalla, **zs, "ztb": ztb}
