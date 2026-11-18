@@ -14,6 +14,12 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
   - Firewalla MSP API: `Authorization: Token <token>`, `https://<msp domain>/v2/{boxes,devices,alarms}`
   - Zscaler OneAPI: token from `https://<vanity>.zslogin<cloud>.net/oauth2/v1/token`,
     then `/zia/api/v1`, `/zpa/mgmtconfig/v1/admin/customers/<id>`, `/zdx/v1`, `/aiguard/v1`, `/ztw/api/v1/ecgroup`
+  - Zscaler Zero Trust Branch (former Airgap; not in OneAPI): `collect_ztb`, API key login at
+    `https://<tenant>.goairgap.com/api/v3/api-key-auth/login` -> `result.delegate_token` (Bearer), then GET
+    `/api/v2/Site/`, `/api/v2/Site/siteByID/<id>/overview`, `/api/v2/devices/active`, `/api/v2/alarm`.
+    Paths and field names come from Zscaler's Python SDK (`zscaler/ztb`). It reports no bandwidth, so the
+    Zero Trust Branch page (`vZtb`) joins each gateway to an SNMP device by IP or name for throughput and
+    utilization (`ifHighSpeed`). The older `ztw` source is Cloud & Branch Connector, a different product.
 - `app/store.py` - SQLite + Fernet-encrypted settings, admin password, sessions
 - `app/static/index.html` - whole UI in one file, vanilla JS, no build step
 - `Dockerfile`, `docker-compose.yml`, `install.sh`, `deploy.ps1` - packaging and deploy
@@ -53,4 +59,4 @@ Settings and secrets live in the `nsm_data` volume and survive redeploys.
 ## Status
 
 Tested against stand-ins only: local snmpd, a mock Proxmox/UniFi server. Not yet
-verified against real Zscaler, UniFi or Proxmox responses; expect field-name fixes.
+verified against real Zscaler (including Zero Trust Branch), UniFi or Proxmox responses; expect field-name fixes.

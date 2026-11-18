@@ -25,6 +25,8 @@ DEFAULT_CONFIG = {
         "enabled": False, "vanity": "", "cloud": "", "client_id": "", "client_secret": "",
         "zpa_customer_id": "", "zia": True, "zpa": True, "zdx": True, "aiguard": True, "ztw": True, "zins": True,
     },
+    # Zero Trust Branch (the former Airgap) has its own API and API key; OneAPI does not serve it.
+    "ztb": {"enabled": False, "cloud": "", "api_key": ""},
 }
 
 
@@ -108,6 +110,8 @@ def normalize(cfg):
     out["snmp"]["devices"] = devices[:500]
     fw = out["firewalla"]
     fw["domain"] = fw["domain"].lower().split("://", 1)[-1].split("/", 1)[0].strip()
+    b = out["ztb"]  # accept 'acme-api', 'acme-api.goairgap.com' or a pasted https:// URL
+    b["cloud"] = b["cloud"].lower().split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].split(".goairgap.com", 1)[0].strip(". ")
     z = out["zscaler"]
     z["vanity"], cloud_hint = _clean_vanity(z["vanity"])
     cloud = (z["cloud"] or cloud_hint).lower().strip(". ")
