@@ -954,6 +954,10 @@ def _ztb_base(cloud):
     return f"https://{cloud}.goairgap.com"
 
 
+def _ztb_oneapi_base(cloud):
+    return (f"https://api.{cloud}.zsapi.net" if cloud else "https://api.zsapi.net") + "/ztb"
+
+
 def _ztb_items(body):
     """List responses arrive as {"result": {"<name>": [...]}}, {"result": [...]} or {"rows": [...]}."""
     if isinstance(body, list):
@@ -1014,33 +1018,51 @@ async def _ztb_login(c, base, api_key, key):
 
 
 async def collect_ztb(cfg):
-    b = cfg["ztb"]
-    if not (b["enabled"] and b["cloud"] and b["api_key"]):
+    """Two ways in. With a tenant and API key: the standalone API at <tenant>.goairgap.com.
+    With both left blank: the same paths through OneAPI (/ztb on api.zsapi.net) using the
+    Zscaler client above, for tenants that manage Zero Trust Branch inside the main console."""
+    b, z = cfg["ztb"], cfg["zscaler"]
+    if not b["enabled"]:
         return {"configured": False}
-    if not (LABEL_RE.match(b["cloud"]) and b["cloud"]):
+    direct = bool(b["cloud"] or b["api_key"])
+    if direct and not (b["cloud"] and b["api_key"]):
+        return {"configured": True, "ok": False, "error":
+                "Enter both the tenant and the API key, or leave both blank to use the Zscaler OneAPI client."}
+    if direct and not LABEL_RE.match(b["cloud"]):
         return {"configured": True, "ok": False,
                 "error": "Tenant should be the part before .goairgap.com, for example acme-api"}
-    base = _ztb_base(b["cloud"])
+    if not direct:
+        if not (z["vanity"] and z["client_id"] and z["client_secret"]):
+            return {"configured": True, "ok": False, "error":
+                    "Fill in the Zscaler OneAPI client in Settings, or enter a Zero Trust Branch tenant and API key."}
+        if not (LABEL_RE.match(z["vanity"]) and LABEL_RE.match(z["cloud"])):
+            return {"configured": True, "ok": False, "error": "Check the Zscaler vanity domain"}
+    base = _ztb_base(b["cloud"]) if direct else _ztb_oneapi_base(z["cloud"])
     key = (b["cloud"], hashlib.sha256(b["api_key"].encode()).hexdigest())
-    out = {"configured": True, "ok": True, "error": "", "tenant": b["cloud"], "notes": [],
+    out = {"configured": True, "ok": True, "error": "", "tenant": b["cloud"] if direct else z["vanity"],
+           "via": "API key" if direct else "OneAPI", "notes": [],
            "sites": [], "devices": [], "devices_total": 0, "users": [], "alarms": None}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             try:
-                cached = _ztb_tokens.get(key)
-                state = {"tok": cached[0] if cached and cached[1] > time.time() else await _ztb_login(c, base, b["api_key"], key)}
+                if direct:
+                    cached = _ztb_tokens.get(key)
+                    state = {"tok": cached[0] if cached and cached[1] > time.time() else await _ztb_login(c, base, b["api_key"], key)}
+                else:
+                    state = {"tok": await _zs_token(c, z)}
             except httpx.HTTPStatusError as e:
-                hint = " Check the API key." if e.response.status_code in (400, 401, 403) else ""
+                hint = (" Check the API key." if direct else " Check the Zscaler client ID and secret.") if e.response.status_code in (400, 401, 403) else ""
                 return {"configured": True, "ok": False, "error": "Sign-in failed: " + _err(e) + "." + hint}
             except httpx.ConnectError as e:
+                host = f"{b['cloud']}.goairgap.com" if direct else f"{z['vanity']}.zslogin{z['cloud']}.net"
                 return {"configured": True, "ok": False, "error":
-                        f"Sign-in failed: cannot reach {b['cloud']}.goairgap.com ({str(e)[:80]}). Check the tenant name."}
+                        f"Sign-in failed: cannot reach {host} ({str(e)[:80]}). Check the tenant name."}
 
             async def get(path, params=None):
                 for attempt in (0, 1):
                     r = await c.get(base + path, params=params,
                                     headers={"Authorization": "Bearer " + state["tok"], "Accept": "application/json"})
-                    if r.status_code == 401 and attempt == 0:  # token expired: sign in again, once
+                    if r.status_code == 401 and attempt == 0 and direct:  # token expired: sign in again, once
                         state["tok"] = await _ztb_login(c, base, b["api_key"], key)
                         continue
                     r.raise_for_status()
@@ -1056,7 +1078,17 @@ async def collect_ztb(cfg):
                 return None
 
             # Sites, then each site's overview for its gateways (the branch appliances).
-            listed = [s for s in _ztb_items(await get("/api/v2/Site/", {"page": 1, "limit": 200})) if isinstance(s, dict)]
+            try:
+                first = await get("/api/v2/Site/", {"page": 1, "limit": 200})
+            except httpx.HTTPStatusError as e:
+                if direct or e.response.status_code not in (401, 403, 404):
+                    raise
+                # OneAPI signed in but would not serve Zero Trust Branch: say what to try, not just the code
+                return {"configured": True, "ok": False, "error":
+                        f"Zscaler OneAPI did not serve Zero Trust Branch (HTTP {e.response.status_code} from /ztb/api/v2/Site/). "
+                        "Either the API client has no Zero Trust Branch role in ZIdentity, or this tenant only offers "
+                        "the separate Zero Trust Branch API key."}
+            listed = [s for s in _ztb_items(first) if isinstance(s, dict)]
             if len(listed) > ZTB_MAX_SITES:
                 out["notes"].append(f"gateway detail loaded for the first {ZTB_MAX_SITES} of {len(listed)} sites")
 
