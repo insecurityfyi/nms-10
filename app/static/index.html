@@ -655,7 +655,7 @@ function vZtb() {
   const sum = k => live.reduce((t, x) => t + x.d[k], 0);
   const box = (k, v, unit, sub, cls) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v, unit && $("small", null, " " + unit)), $("div", {class: "s " + (cls || "mute")}, sub || " "));
   const tiles = $("section", {class: "tiles", "aria-label": "Zero Trust Branch totals"},
-    box("Sites", sites.length, "", s.sites.length > sites.length ? "of " + s.sites.length : "Tenant " + s.tenant),
+    box("Sites", sites.length, "", s.sites.length > sites.length ? "of " + s.sites.length : "Via " + (s.via || "API key") + " · " + s.tenant),
     box("Gateways", gws.length, "", !gws.length ? "None reported" : down ? "✕ " + down + " down" : "● None reported down", !gws.length ? "mute" : down ? "crit" : "ok"),
     box("Devices", devs.length, "", quar ? "▲ " + quar + " quarantined" : "None quarantined", quar ? "warn" : "mute"),
     box("Users", users.length, "", "Signed in on branch devices"),
@@ -783,8 +783,8 @@ function renderSettings() {
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
       $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Cloud & Branch Connector", {type: "checkbox"}), field(S.zscaler, "zins", "Analytics (Z-Insights)", {type: "checkbox"}))),
-    $("section", {class: "card"}, $("h2", null, "Zscaler Zero Trust Branch"), $("p", {class: "note"}, "Zero Trust Branch (formerly Airgap) has its own API, separate from the OneAPI client above. Create an API key in the Zero Trust Branch portal. The tenant is the first part of the API address, for example acme-api in acme-api.goairgap.com. Bandwidth comes from SNMP: add each branch appliance under SNMP devices."),
-      $("div", {class: "form"}, field(S.ztb, "enabled", "Enabled", {type: "checkbox"}), field(S.ztb, "cloud", "Tenant (before .goairgap.com)", {placeholder: "acme-api"}), field(S.ztb, "api_key", "API key", pw))),
+    $("section", {class: "card"}, $("h2", null, "Zscaler Zero Trust Branch"), $("p", {class: "note"}, "Zero Trust Branch (formerly Airgap). If you manage it inside the main Zscaler console, tick Enabled and leave Tenant and API key blank: it then uses the OneAPI client above. If you have a separate address ending in .goairgap.com, enter its first part as the tenant (for example acme-api) with an API key from that portal. Bandwidth comes from SNMP: add each branch appliance under SNMP devices."),
+      $("div", {class: "form"}, field(S.ztb, "enabled", "Enabled", {type: "checkbox"}), field(S.ztb, "cloud", "Tenant (blank to use OneAPI)", {placeholder: "blank, or acme-api"}), field(S.ztb, "api_key", "API key (blank to use OneAPI)", pw))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }

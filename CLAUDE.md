@@ -17,6 +17,8 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
   - Zscaler Zero Trust Branch (former Airgap; not in OneAPI): `collect_ztb`, API key login at
     `https://<tenant>.goairgap.com/api/v3/api-key-auth/login` -> `result.delegate_token` (Bearer), then GET
     `/api/v2/Site/`, `/api/v2/Site/siteByID/<id>/overview`, `/api/v2/devices/active`, `/api/v2/alarm`.
+    With tenant and key blank it sends the same paths through OneAPI (`https://api.zsapi.net/ztb/api/v2/...`,
+    the SDK's `ZTBService` route) with the Zscaler client; unverified, so a refusal is reported with a hint.
     Paths and field names come from Zscaler's Python SDK (`zscaler/ztb`). It reports no bandwidth, so the
     Zero Trust Branch page (`vZtb`) joins each gateway to an SNMP device by IP or name for throughput and
     utilization (`ifHighSpeed`). The older `ztw` source is Cloud & Branch Connector, a different product.

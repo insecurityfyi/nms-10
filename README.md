@@ -8,7 +8,7 @@ Read-only monitoring dashboard for a small network:
 - **Firewalla** via the MSP API: boxes, device counts, active alarms
 - **Zscaler** via OneAPI: ZIA, ZPA, ZDX, AI Security (AI Guard) and Cloud & Branch Connector, including the
   Zscaler data center each connector is attached to
-- **Zscaler Zero Trust Branch** (formerly Airgap) via its own API key: sites, gateways, devices,
+- **Zscaler Zero Trust Branch** (formerly Airgap) via OneAPI or its own API key: sites, gateways, devices,
   signed-in users and alarms, with bandwidth utilization from SNMP on the branch appliance
 - **Zscaler activity** (Z-Insights): web transactions allowed and blocked, blocked threat
   categories, application categories and applications accessed, for 2 hours, 24 hours or 7 days
@@ -48,7 +48,7 @@ password. Re-run the same command to update.
 | Proxmox | API URL (port 8006), token ID, token secret | `PVEAuditor` on `/` |
 | Firewalla | MSP domain, personal access token | Read Only token from MSP Settings > MSP API |
 | Zscaler | vanity domain, client ID and secret, ZPA customer ID | read-only API roles in ZIdentity |
-| Zero Trust Branch | tenant (the part before `.goairgap.com`), API key | API key from the Zero Trust Branch portal |
+| Zero Trust Branch | nothing extra (uses the Zscaler OneAPI client), or a tenant (the part before `.goairgap.com`) and API key | a Zero Trust Branch role on the API client, or an API key from the Zero Trust Branch portal |
 
 ## Notes
 
