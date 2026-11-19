@@ -1,5 +1,6 @@
 """Read-only collectors for SNMP, UniFi, Proxmox VE, Firewalla and Zscaler (OneAPI and Zero Trust Branch)."""
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import re
@@ -562,10 +563,200 @@ async def _zia(c, base, tok):
     return out
 
 
+_zpa_cache = {}
+ZPA_DETAIL_TTL = 300   # config and Client Connector detail is re-read at most this often (rate limits)
+ZPA_MAX_PAGES = 6      # x 500 rows per list
+
+
+async def _zpa_list(c, url, tok, params=None, pages=ZPA_MAX_PAGES):
+    """All rows of a paged ZPA list ({"totalPages", "list"}); stops at `pages` pages."""
+    rows, page = [], 1
+    while page <= pages:
+        body = await _zs_get(c, url, tok, {**(params or {}), "page": page, "pagesize": 500})
+        got = _as_list(body)
+        rows += [x for x in got if isinstance(x, dict)]
+        total = body.get("totalPages") if isinstance(body, dict) else None
+        if not got or not str(total or "").isdigit() or page >= int(total):
+            break
+        page += 1
+    return rows
+
+
+def _zpa_ports(seg, proto):
+    """'443, 8000-8100' from either tcpPortRange [{from,to}] or tcpPortRanges ['443','443',...]."""
+    out = []
+    for r in seg.get(proto + "PortRange") or []:
+        if isinstance(r, dict) and r.get("from"):
+            out.append(str(r["from"]) if str(r.get("to") or r["from"]) == str(r["from"]) else f"{r['from']}-{r['to']}")
+    flat = seg.get(proto + "PortRanges") or []
+    if not out and isinstance(flat, list):
+        for lo, hi in zip(flat[0::2], flat[1::2]):
+            out.append(str(lo) if str(lo) == str(hi) else f"{lo}-{hi}")
+    return ", ".join(out[:12]) + (f" +{len(out) - 12}" if len(out) > 12 else "")
+
+
+def _truthy(v):
+    return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+
+# What each access-rule criterion is about, for the "who" / "what" split and the diagnostics.
+ZPA_WHO = {"SCIM_GROUP": "Group", "SCIM": "User attribute", "SAML": "SAML attribute", "IDP": "Identity provider"}
+ZPA_WHAT = {"APP": "App segment", "APP_GROUP": "Segment group"}
+ZPA_OTHER = {"POSTURE": "Posture", "TRUSTED_NETWORK": "Trusted network", "CLIENT_TYPE": "Client type",
+             "PLATFORM": "Platform", "COUNTRY_CODE": "Country", "MACHINE_GRP": "Machine group", "LOCATION": "Location",
+             "BRANCH_CONNECTOR_GROUP": "Branch connector group", "EDGE_CONNECTOR_GROUP": "Cloud connector group",
+             "RISK_FACTOR_TYPE": "Risk", "CHROME_ENTERPRISE": "Chrome Enterprise"}
+
+
+def _zpa_rule(r, seg_names, grp_names, scim_names):
+    who, what, other, apps, groups, negated = [], [], [], [], [], False
+    for cond in r.get("conditions") or []:
+        if not isinstance(cond, dict):
+            continue
+        negated = negated or _truthy(cond.get("negated"))
+        for o in cond.get("operands") or []:
+            if not isinstance(o, dict):
+                continue
+            kind, rhs, lhs = str(o.get("objectType") or "").upper(), str(o.get("rhs") or ""), str(o.get("lhs") or "")
+            label = str(o.get("name") or "")
+            if kind == "APP":
+                apps.append(rhs)
+                what.append(label or seg_names.get(rhs) or f"segment {rhs} (deleted?)")
+            elif kind == "APP_GROUP":
+                groups.append(rhs)
+                what.append("Group: " + (label or grp_names.get(rhs) or f"{rhs} (deleted?)"))
+            elif kind in ZPA_WHO:
+                if kind == "SCIM_GROUP":
+                    label = label or scim_names.get(rhs) or f"group {rhs}"
+                elif kind == "IDP":
+                    label = label or str(o.get("idpName") or rhs)
+                else:
+                    label = (label or lhs) + (" = " + rhs if rhs else "")
+                who.append(f"{ZPA_WHO[kind]}: {label}"[:120])
+            else:
+                val = {"true": "pass", "false": "fail"}.get(rhs.lower(), rhs) if kind in ("POSTURE", "TRUSTED_NETWORK") else rhs
+                other.append(f"{ZPA_OTHER.get(kind, kind.replace('_', ' ').title())}: {label or lhs}{' = ' + val if val and label else ''}"[:120]
+                             if kind != "CLIENT_TYPE" else "Client type: " + rhs.replace("zpn_client_type_", "").replace("_", " "))
+    order = r.get("ruleOrder")
+    return {"id": str(r.get("id") or ""), "name": str(r.get("name") or "")[:160], "order": int(order) if str(order or "").isdigit() else 0,
+            "action": str(r.get("action") or "").upper(), "disabled": _truthy(r.get("disabled")),
+            "default": _truthy(r.get("defaultRule")), "description": str(r.get("description") or "")[:200],
+            "who": who[:40], "what": what[:60], "other": other[:30], "apps": apps, "groups": groups,
+            "negated": negated, "modified": _ts(r.get("modifiedTime")), "findings": []}
+
+
+def zpa_diagnose(d):
+    """Static checks over the ZPA configuration. Adds `findings` to rules and segments and returns the
+    full list, worst first. Nothing here calls ZPA; it reasons over what was already read."""
+    found = []
+
+    def add(level, kind, subject, text, target):
+        f = {"level": level, "kind": kind, "subject": subject, "text": text}
+        found.append(f)
+        if target is not None:
+            target["findings"].append({"level": level, "text": text})
+
+    segs, rules = d["segments"], sorted(d["rules"], key=lambda r: r["order"])
+    seg_by_id = {s["id"]: s for s in segs}
+    group_members = {}
+    for s in segs:
+        group_members.setdefault(s["group_id"], set()).add(s["id"])
+    all_ids, group_ids = set(seg_by_id), {g["id"] for g in d["segment_groups"]}
+
+    def covers(r):
+        """Segment ids a rule applies to; None means every application."""
+        if not r["apps"] and not r["groups"]:
+            return None
+        out = set(r["apps"])
+        for g in r["groups"]:
+            out |= group_members.get(g, set())
+        return out
+
+    live = [r for r in rules if not r["disabled"]]
+    for r in rules:
+        cov = covers(r)
+        r["segments"] = None if cov is None else len(cov & all_ids)
+        if r["disabled"]:
+            add("info", "rule", r["name"], "Rule is disabled, so it is never evaluated.", r)
+            continue
+        stale = [a for a in r["apps"] if a not in all_ids] + [g for g in r["groups"] if g not in group_ids]
+        if stale and (segs or d["segment_groups"]):
+            add("warn", "rule", r["name"], f"Refers to {len(stale)} app segment or segment group that no longer exists.", r)
+        if cov is not None and cov and not any(seg_by_id[i]["enabled"] for i in cov if i in seg_by_id) and (cov & all_ids):
+            add("info", "rule", r["name"], "Every app segment this rule names is disabled.", r)
+        if r["action"] == "ALLOW" and not r["who"] and not r["negated"]:
+            scope = "every application" if cov is None else f"{len(cov & all_ids)} app segment(s)"
+            add("warn" if cov is None else "info", "rule", r["name"],
+                f"Allows {scope} without naming a user, group or identity provider"
+                + (" (other conditions still apply)." if r["other"] else ": anyone who can sign in matches."), r)
+        elif cov is None and not r["negated"]:
+            add("info", "rule", r["name"], "Has no application condition, so it applies to every application.", r)
+    # Shadowing: ZPA takes the first matching rule. An earlier rule with only application conditions
+    # (or none) matches everything a later rule could match for those applications.
+    for i, r in enumerate(live):
+        cov = covers(r)
+        for e in live[:i]:
+            if e["who"] or e["other"] or e["negated"]:
+                continue
+            ecov = covers(e)
+            if ecov is None or (cov is not None and cov and cov <= ecov):
+                clash = "" if e["action"] == r["action"] else f", which gives {e['action'].lower()} where this rule says {r['action'].lower()}"
+                add("warn", "rule", r["name"], f"Never reached: rule {e['order']} “{e['name']}” matches the same traffic first{clash}.", r)
+                break
+
+    healthy_by_group, total_by_group = {}, {}
+    for c in d["connectors"]:
+        total_by_group[c["group_id"]] = total_by_group.get(c["group_id"], 0) + 1
+        if c["healthy"]:
+            healthy_by_group[c["group_id"]] = healthy_by_group.get(c["group_id"], 0) + 1
+    sg_by_id = {g["id"]: g for g in d["server_groups"]}
+    have_rules = bool(rules)
+    for s in segs:
+        cg = []
+        for g in s["server_group_ids"]:
+            cg += sg_by_id.get(g, {}).get("connector_group_ids", [])
+        cg = list(dict.fromkeys(cg))
+        s["connector_group_ids"] = cg
+        s["connectors"] = sum(total_by_group.get(g, 0) for g in cg)
+        s["connectors_healthy"] = sum(healthy_by_group.get(g, 0) for g in cg)
+        matching = [r for r in live if (lambda cov: cov is None or s["id"] in cov)(covers(r))]
+        s["rules"] = [{"order": r["order"], "name": r["name"], "action": r["action"]} for r in matching][:12]
+        if not s["enabled"]:
+            add("info", "segment", s["name"], "App segment is disabled.", s)
+            continue
+        if not s["server_group_ids"]:
+            add("crit", "segment", s["name"], "No server group is attached, so no App Connector can serve it.", s)
+        elif d["server_groups"] and not cg:
+            add("crit", "segment", s["name"], "Its server groups have no App Connector group.", s)
+        elif d["connectors_known"] and cg and not s["connectors"]:
+            add("crit", "segment", s["name"], "Its App Connector groups contain no connectors.", s)
+        elif d["connectors_known"] and cg and not s["connectors_healthy"]:
+            add("crit", "segment", s["name"], f"None of its {s['connectors']} App Connectors is connected.", s)
+        elif d["connectors_known"] and cg and s["connectors_healthy"] == 1:
+            add("info", "segment", s["name"], "Served by a single connected App Connector (no redundancy).", s)
+        if have_rules and not any(r["action"] == "ALLOW" for r in matching):
+            add("warn", "segment", s["name"], "No enabled access rule allows it, so users are blocked by default.", s)
+        elif have_rules and matching and matching[0]["action"] != "ALLOW" and not (matching[0]["who"] or matching[0]["other"]):
+            add("warn", "segment", s["name"], f"The first rule that matches it (rule {matching[0]['order']}) denies everyone.", s)
+    for g in d["connector_groups"]:
+        if d["connectors_known"] and g["enabled"] and not total_by_group.get(g["id"]):
+            add("warn", "connector group", g["name"], "Enabled App Connector group with no connectors.", None)
+    for c in d["connectors"]:
+        if c["enabled"] and c["expected"] and c["version"] and c["expected"] != c["version"]:
+            add("info", "connector", c["name"], f"Running {c['version']}; {c['expected']} is expected (upgrade pending).", None)
+    if d["lss"] is not None and not any(x["enabled"] for x in d["lss"]):
+        add("info", "logging", "Log streaming", "No log receiver is enabled. ZPA exposes user sessions and app usage only through "
+            "log streaming, so that activity is not available to any outside tool.", None)
+    rank = {"crit": 0, "warn": 1, "info": 2}
+    found.sort(key=lambda f: rank[f["level"]])
+    return found
+
+
 async def _zpa(c, base, tok, customer):
     if not customer:
         raise ValueError("ZPA customer ID is not set")
     root = f"{base}/zpa/mgmtconfig/v1/admin/customers/{customer}"
+    root2 = f"{base}/zpa/mgmtconfig/v2/admin/customers/{customer}"
     conns = _as_list(await _zs_get(c, f"{root}/connector", tok, {"page": 1, "pagesize": 500}))
     out = {"connectors": [], "segments": None}
     for x in conns:
@@ -574,17 +765,127 @@ async def _zpa(c, base, tok, customer):
             "name": x.get("name") or "", "enabled": bool(x.get("enabled", True)),
             "status": st.replace("ZPN_STATUS_", "").replace("_", " ").title() or "Unknown",
             "healthy": bool(x.get("enabled", True)) and st.endswith("AUTHENTICATED"),
-            "version": x.get("currentVersion") or "",
-            "group": x.get("appConnectorGroupName") or "",
+            "version": x.get("currentVersion") or "", "expected": x.get("expectedVersion") or "",
+            "upgrade": str(x.get("upgradeStatus") or "").replace("_", " ").title(),
+            "group": x.get("appConnectorGroupName") or "", "group_id": str(x.get("appConnectorGroupId") or ""),
             # the ZPA broker (Zscaler data center) holding this connector's control connection
             "broker": x.get("ctrlBrokerName") or "", "location": x.get("location") or "",
-            "public_ip": x.get("publicIp") or ""})
-    try:
-        body = await _zs_get(c, f"{root}/application", tok, {"page": 1, "pagesize": 500})
-        total = body.get("totalCount") if isinstance(body, dict) else None
-        out["segments"] = int(total) if str(total or "").isdigit() else len(_as_list(body))
-    except httpx.HTTPError:
-        pass
+            "public_ip": x.get("publicIp") or "", "private_ip": x.get("privateIp") or "",
+            "platform": " ".join(str(x.get(k) or "") for k in ("platform", "runtimeOS")).strip(),
+            "connected_since": _ts(x.get("lastBrokerConnectTime")), "last_disconnect": _ts(x.get("lastBrokerDisconnectTime")),
+            "started": _ts(x.get("applicationStartTime"))})
+
+    # Everything below is configuration that changes rarely: read it at most every ZPA_DETAIL_TTL seconds.
+    hit = _zpa_cache.get(customer)
+    if hit and hit["t"] > time.time() - ZPA_DETAIL_TTL:
+        d = hit["d"]
+    else:
+        d = {"notes": [], "read_at": time.time()}
+
+        async def opt(label, coro, default):
+            try:
+                return await coro
+            except httpx.HTTPStatusError as e:
+                d["notes"].append(f"{label}: HTTP {e.response.status_code}")
+            except (httpx.HTTPError, ValueError) as e:
+                d["notes"].append(f"{label}: {type(e).__name__}")
+            return default
+
+        seg_rows, grp_rows, sg_rows, cg_rows, rule_rows, idp_rows, lss_rows, edge_rows = await asyncio.gather(
+            opt("app segments", _zpa_list(c, f"{root}/application", tok), None),
+            opt("segment groups", _zpa_list(c, f"{root}/segmentGroup", tok), []),
+            opt("server groups", _zpa_list(c, f"{root}/serverGroup", tok), []),
+            opt("App Connector groups", _zpa_list(c, f"{root}/appConnectorGroup", tok), []),
+            opt("access policy", _zpa_list(c, f"{root}/policySet/rules/policyType/ACCESS_POLICY", tok), None),
+            opt("identity providers", _zpa_list(c, f"{root2}/idp", tok, pages=1), None),
+            opt("log receivers", _zpa_list(c, f"{root2}/lssConfig", tok, pages=1), None),
+            opt("service edges", _zpa_list(c, f"{root}/serviceEdge", tok, pages=1), []))
+        ids = lambda rows: [str(x.get("id")) for x in rows or [] if isinstance(x, dict) and x.get("id")]  # noqa: E731
+        d["segments"] = [{
+            "id": str(x.get("id") or ""), "name": str(x.get("name") or "")[:160], "enabled": bool(x.get("enabled", True)),
+            "domains": [str(v)[:120] for v in (x.get("domainNames") or [])[:40]], "domain_count": len(x.get("domainNames") or []),
+            "tcp": _zpa_ports(x, "tcp"), "udp": _zpa_ports(x, "udp"),
+            "group_id": str(x.get("segmentGroupId") or ""), "group": str(x.get("segmentGroupName") or ""),
+            "server_group_ids": ids(x.get("serverGroups")), "server_groups": [_nm(g) for g in (x.get("serverGroups") or [])][:12],
+            "bypass": str(x.get("bypassType") or "").replace("_", " ").title(), "health": str(x.get("healthReporting") or "").replace("_", " ").title(),
+            "double_encrypt": _truthy(x.get("doubleEncrypt")), "inspect": _truthy(x.get("inspectTrafficWithZia")),
+            "modified": _ts(x.get("modifiedTime")), "findings": []} for x in seg_rows or []]
+        d["segments_known"] = seg_rows is not None
+        d["segment_groups"] = [{"id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "enabled": bool(x.get("enabled", True)),
+                                "segments": len(x.get("applications") or [])} for x in grp_rows]
+        d["server_groups"] = [{"id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "enabled": bool(x.get("enabled", True)),
+                               "dynamic": _truthy(x.get("dynamicDiscovery")), "connector_group_ids": ids(x.get("appConnectorGroups"))} for x in sg_rows]
+        d["connector_groups"] = [{
+            "id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "enabled": bool(x.get("enabled", True)),
+            "location": str(x.get("location") or x.get("cityCountry") or ""), "profile": str(x.get("versionProfileName") or ""),
+            "upgrade_day": str(x.get("upgradeDay") or "").title(), "upgrade_secs": int(x["upgradeTimeInSecs"]) if str(x.get("upgradeTimeInSecs") or "").isdigit() else None,
+            "server_groups": len(x.get("serverGroups") or [])} for x in cg_rows]
+        d["idps"] = None if idp_rows is None else [{
+            "id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "enabled": bool(x.get("enabled", True)),
+            "sso": ", ".join(str(v).title() for v in x.get("ssoType") or []), "scim": _truthy(x.get("scimEnabled")),
+            "domains": [str(v) for v in (x.get("domainList") or [])[:8]], "groups": None} for x in idp_rows]
+        # Groups synced from each identity provider (who rules can be written against).
+        scim_names, d["groups"] = {}, []
+        for idp in [i for i in d["idps"] or [] if i["scim"]][:4]:
+            rows = await opt(f"groups for {idp['name']}", _zpa_list(c, f"{base}/zpa/userconfig/v1/customers/{customer}/scimgroup/idpId/{idp['id']}", tok, pages=4), None)
+            if rows is not None:
+                idp["groups"] = len(rows)
+                for g in rows:
+                    scim_names[str(g.get("id"))] = str(g.get("name") or "")
+                    d["groups"].append({"id": str(g.get("id") or ""), "name": str(g.get("name") or "")[:120], "idp": idp["name"], "rules": 0})
+        seg_names = {s["id"]: s["name"] for s in d["segments"]}
+        grp_names = {g["id"]: g["name"] for g in d["segment_groups"]}
+        d["rules"] = [_zpa_rule(r, seg_names, grp_names, scim_names) for r in rule_rows or []]
+        d["rules_known"] = rule_rows is not None
+        used = {}
+        for r, raw in zip(d["rules"], rule_rows or []):
+            for cond in raw.get("conditions") or []:
+                for o in (cond.get("operands") or []) if isinstance(cond, dict) else []:
+                    if isinstance(o, dict) and str(o.get("objectType") or "").upper() == "SCIM_GROUP":
+                        used[str(o.get("rhs"))] = used.get(str(o.get("rhs")), 0) + 1
+        for g in d["groups"]:
+            g["rules"] = used.get(g["id"], 0)
+        d["groups"].sort(key=lambda g: (-g["rules"], g["name"].lower()))
+        d["groups_total"], d["groups"] = len(d["groups"]), d["groups"][:400]
+        d["lss"] = None if lss_rows is None else [{
+            "name": str((x.get("config") or x).get("name") or ""), "enabled": bool((x.get("config") or x).get("enabled", True)),
+            "type": str((x.get("config") or x).get("sourceLogType") or "").replace("zpn_", "").replace("_", " "),
+            "host": str((x.get("config") or x).get("lssHost") or ""), "port": str((x.get("config") or x).get("lssPort") or ""),
+            "tls": _truthy((x.get("config") or x).get("useTls"))} for x in lss_rows]
+        d["edges"] = [{"name": str(x.get("name") or ""), "enabled": bool(x.get("enabled", True)),
+                       "status": str(x.get("controlChannelStatus") or "").replace("ZPN_STATUS_", "").replace("_", " ").title(),
+                       "healthy": str(x.get("controlChannelStatus") or "").endswith("AUTHENTICATED"),
+                       "group": str(x.get("serviceEdgeGroupName") or ""), "version": str(x.get("currentVersion") or ""),
+                       "public_ip": str(x.get("publicIp") or "")} for x in edge_rows]
+        # Users: ZPA's own API has no list of users or sessions. Client Connector does know which enrolled
+        # devices have Private Access switched on, who is signed in on them and when they were last seen.
+        dev_rows = await opt("Client Connector devices", _zs_get(c, f"{base}/zcc/papi/public/v1/getDevices", tok, {"page": 1, "pageSize": 1000}), None)
+        d["users"] = None
+        if dev_rows is not None:
+            users = {}
+            for x in _as_list(dev_rows, "devices"):
+                if not isinstance(x, dict):
+                    continue
+                name = str(x.get("user") or x.get("username") or "").strip()
+                u = users.setdefault(name.lower() or "(no user)", {"name": name or "(no user)", "devices": [], "zpa": 0, "last_seen": None})
+                seen = _ts(x.get("zpaLastSeenTime")) or _ts(x.get("last_seen_time"))
+                on = _truthy(x.get("zpaEnabled"))
+                u["devices"].append({"name": str(x.get("machineHostname") or "")[:80], "os": str(x.get("osVersion") or "")[:80],
+                                     "version": str(x.get("agentVersion") or ""), "state": str(x.get("registrationState") or x.get("state") or ""),
+                                     "zpa": on, "zpa_health": str(x.get("zpaHealth") or ""), "policy": str(x.get("policyName") or "")[:80],
+                                     "last_seen": seen})
+                u["zpa"] += 1 if on else 0
+                if seen and (u["last_seen"] or 0) < seen:
+                    u["last_seen"] = seen
+            d["users"] = sorted(users.values(), key=lambda u: u["name"].lower())[:1000]
+        _zpa_cache.clear()
+        _zpa_cache[customer] = {"t": time.time(), "d": d}
+
+    view = {k: (copy.deepcopy(v) if k in ("segments", "rules") else v) for k, v in d.items()}
+    view["connectors"], view["connectors_known"] = out["connectors"], True
+    view["findings"] = zpa_diagnose(view) if (view["segments_known"] or view["rules_known"]) else []
+    out["segments"] = len(view["segments"]) if view["segments_known"] else None
+    out["detail"] = {k: v for k, v in view.items() if k not in ("connectors", "connectors_known")}
     return out
 
 

@@ -38,6 +38,8 @@ tr:last-child td{border-bottom:0}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line2);font-size:13px}.kv:last-child{border-bottom:0}
 .grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
 .inset{background:var(--inset);border-radius:8px;padding:14px 16px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+.inset .k{color:var(--mute);font-size:12px;margin-bottom:4px}
 .bar{height:6px;background:#232B36;border-radius:3px;margin-top:4px}.bar>i{display:block;height:6px;border-radius:3px;background:var(--accent)}.bar>i.hot{background:var(--warn)}
 .node{display:grid;grid-template-columns:90px repeat(3,minmax(0,1fr));gap:14px;align-items:center;font-size:12px;margin-bottom:14px}
 .alert{padding:11px 0;border-bottom:1px solid var(--line2)}.alert:last-child{border-bottom:0}
@@ -158,7 +160,7 @@ async function refresh(force) {
 /* ---------- layout ---------- */
 const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"], ["endpoints", "Endpoints"]]],
   ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"], ["firewalla", "Firewalla"]]],
-  ["Zscaler", [["zscaler", "Zscaler"], ["ztb", "Zero Trust Branch"]]],
+  ["Zscaler", [["zscaler", "Zscaler"], ["zpa", "Private Access"], ["ztb", "Zero Trust Branch"]]],
   ["Admin", [["settings", "Settings & credentials"]]]];
 function navEl() {
   const n = state ? state.alerts.length : 0;
@@ -170,13 +172,13 @@ function navEl() {
       $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
 }
 function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
-const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", ztb: "Zero Trust Branch", settings: "Settings & credentials"};
+const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", zpa: "Private Access (ZPA)", ztb: "Zero Trust Branch", settings: "Settings & credentials"};
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
   const keep = {}; document.querySelectorAll(".tree").forEach(t => { keep[t.id] = t.scrollLeft; });
   const act = document.activeElement, actId = act && act.id, caret = act && act.tagName === "INPUT" ? act.selectionStart : null;
-  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, ztb: vZtb, settings: vSettings}[view]();
+  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, zpa: vZpa, ztb: vZtb, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
@@ -608,6 +610,106 @@ function vZscaler() {
     $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
   out.push(aiPolicies() || (ai.ok && ai.policy_names.length ? $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))) : null));
   return out;
+}
+
+/* ---------- Private Access (ZPA) ---------- */
+const zp = {q: "", uq: "", seg: "", rule: "", info: false};
+function vZpa() {
+  const bad = notReady("zpa", "ZPA"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("zpa"), d = s.detail;
+  if (!d) return $("section", {class: "card"}, $("div", {class: "empty"}, "Reading the Private Access configuration…"));
+  const segs = d.segments, rules = d.rules.slice().sort((a, b) => a.order - b.order), conns = s.connectors, F = d.findings;
+  const lv = {crit: ["✕", "crit", "Problem"], warn: ["▲", "warn", "Warning"], info: ["○", "mute", "Note"]};
+  const count = l => F.filter(f => f.level === l).length, healthy = conns.filter(c => c.healthy).length;
+  const few = (list, n) => list.slice(0, n).join(", ") + (list.length > n ? " +" + (list.length - n) : "");
+  const marks = x => x.findings.length ? $("span", {class: lv[x.findings.some(f => f.level === "crit") ? "crit" : x.findings.some(f => f.level === "warn") ? "warn" : "info"][1]}, lv[x.findings.some(f => f.level === "crit") ? "crit" : x.findings.some(f => f.level === "warn") ? "warn" : "info"][0] + " " + x.findings.length) : $("span", {class: "ok"}, "●");
+  const box = (k, v, sub, cls) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v), $("div", {class: "s " + (cls || "mute")}, sub || " "));
+  const zpaUsers = d.users ? d.users.filter(u => u.zpa) : null, offSeg = segs.filter(x => !x.enabled).length, offRule = rules.filter(r => r.disabled).length;
+  const tiles = $("section", {class: "tiles", "aria-label": "Private Access totals"},
+    box("App segments", d.segments_known ? segs.length : dash, d.segments_known ? (offSeg ? offSeg + " disabled" : "All enabled") : "Not readable"),
+    box("Access rules", d.rules_known ? rules.length : dash, d.rules_known ? (offRule ? offRule + " disabled" : "All enabled") : "Not readable"),
+    box("App Connectors", conns.length, conns.length ? (healthy === conns.length ? "● All connected" : "▲ " + healthy + " connected") : "None", !conns.length ? "mute" : healthy === conns.length ? "ok" : "warn"),
+    box("Findings", count("crit") + count("warn"), count("crit") ? "✕ " + count("crit") + " problems" : count("warn") ? "▲ warnings only" : "● Nothing flagged", count("crit") ? "crit" : count("warn") ? "warn" : "ok"),
+    box("Users", zpaUsers ? zpaUsers.length : dash, zpaUsers ? "Private Access on, of " + d.users.length : "Not readable"),
+    box("Groups", d.groups_total || 0, d.idps ? d.idps.length + " identity provider" + (d.idps.length === 1 ? "" : "s") : "Identity not readable"));
+
+  /* rule diagnostics */
+  const shown = F.filter(f => zp.info || f.level !== "info"), nInfo = count("info");
+  const diag = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Rule diagnostics"), nInfo ? $("button", {type: "button", "aria-pressed": zp.info ? "true" : "false", onclick: () => { zp.info = !zp.info; render(); }}, (zp.info ? "Hide " : "Show ") + nInfo + " note" + (nInfo === 1 ? "" : "s")) : null),
+    shown.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Level", "About", "Name", "Finding"].map(h => $("th", null, h)))),
+      $("tbody", null, shown.slice(0, 200).map(f => $("tr", null, $("td", {class: lv[f.level][1], style: "font-weight:600"}, lv[f.level][0] + " " + lv[f.level][2]), $("td", {class: "mute"}, f.kind.charAt(0).toUpperCase() + f.kind.slice(1)), $("td", {style: "font-weight:500"}, f.subject), $("td", {style: "white-space:normal;min-width:320px"}, f.text))))))
+      : $("div", {class: "empty"}, F.length ? "No problems or warnings. " + nInfo + " informational note" + (nInfo === 1 ? "" : "s") + " hidden." : "Nothing flagged."),
+    $("p", {class: "note"}, "These checks read the configuration: rule order and shadowing, rules that match anyone, segments no rule allows, and segments with no connected App Connector. They do not test live traffic. ZPA reports why a specific user was blocked only through log streaming."));
+
+  /* access policy */
+  const selR = rules.find(r => r.id === zp.rule);
+  const ruleDetail = selR && $("div", {class: "inset", style: "margin-bottom:14px"}, $("div", {class: "head"}, $("strong", null, selR.order + ". " + selR.name), $("button", {type: "button", onclick: () => { zp.rule = ""; render(); }}, "Close")),
+    selR.description ? $("p", {class: "mute", style: "margin:0 0 8px"}, selR.description) : null,
+    $("div", {class: "grid4"},
+      $("div", null, $("div", {class: "k"}, "Who"), selR.who.length ? selR.who.map(x => $("div", null, x)) : $("div", {class: "mute"}, "Anyone who can sign in")),
+      $("div", null, $("div", {class: "k"}, "Applications"), selR.what.length ? selR.what.map(x => $("div", null, x)) : $("div", {class: "mute"}, "Every application")),
+      $("div", null, $("div", {class: "k"}, "Other conditions"), selR.other.length ? selR.other.map(x => $("div", null, x)) : $("div", {class: "mute"}, "None"), selR.negated ? $("div", {class: "warn"}, "▲ Uses a negated condition") : null)),
+    selR.findings.map(f => $("div", {class: lv[f.level][1], style: "margin-top:6px"}, lv[f.level][0] + " " + f.text)));
+  const policy = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Access policy"), $("span", {class: "mute"}, "Evaluated top to bottom; the first match wins")),
+    !d.rules_known ? $("div", {class: "empty"}, "The access policy could not be read with this API client.") : [ruleDetail,
+      rules.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["#", "Rule", "Action", "Who", "Applications", "Other conditions", "Checks"].map(h => $("th", null, h)))),
+        $("tbody", null, rules.map(r => $("tr", {style: r.disabled ? "opacity:.6" : ""}, $("td", {class: "mono"}, r.order),
+          $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (zp.rule === r.id ? ";border-color:var(--accent)" : ""), "aria-pressed": zp.rule === r.id ? "true" : "false", onclick: () => { zp.rule = zp.rule === r.id ? "" : r.id; render(); }}, r.name || "(unnamed)"), r.disabled ? $("span", {class: "mute"}, "  disabled") : null),
+          $("td", {class: r.action === "ALLOW" ? "ok" : "crit", style: "font-weight:600"}, r.action === "ALLOW" ? "● Allow" : "✕ " + (r.action.charAt(0) + r.action.slice(1).toLowerCase().replace(/_/g, " "))),
+          $("td", {style: "white-space:normal;min-width:180px"}, r.who.length ? few(r.who, 2) : $("span", {class: "mute"}, "Anyone")), $("td", {style: "white-space:normal;min-width:180px"}, r.what.length ? few(r.what, 2) : $("span", {class: "mute"}, "Every application")),
+          $("td", {style: "white-space:normal;min-width:140px"}, r.other.length ? few(r.other, 2) : dash), $("td", null, marks(r))))))) : $("div", {class: "empty"}, "No access rules. With none, ZPA blocks every application.")]);
+
+  /* applications */
+  const q = zp.q.trim().toLowerCase(), max = 300;
+  const list = segs.filter(x => !q || [x.name, x.group, x.tcp, x.udp].concat(x.domains, x.server_groups).some(v => String(v || "").toLowerCase().includes(q)));
+  const selS = segs.find(x => x.id === zp.seg), cgName = id => (d.connector_groups.find(g => g.id === id) || {}).name || id;
+  const segDetail = selS && $("div", {class: "inset", style: "margin-bottom:14px"}, $("div", {class: "head"}, $("strong", null, selS.name), $("button", {type: "button", onclick: () => { zp.seg = ""; render(); }}, "Close")),
+    $("div", {class: "grid4"},
+      $("div", null, kv("Status", selS.enabled ? "Enabled" : "Disabled"), kv("Segment group", selS.group || null), kv("TCP ports", selS.tcp || null), kv("UDP ports", selS.udp || null), kv("Bypass", selS.bypass || null), kv("Health reporting", selS.health || null), kv("Double encryption", selS.double_encrypt ? "On" : "Off"), kv("Inspect with ZIA", selS.inspect ? "On" : "Off")),
+      $("div", null, $("div", {class: "k"}, "Domains and addresses (" + selS.domain_count + ")"), selS.domains.map(x => $("div", {class: "mono"}, x)), selS.domain_count > selS.domains.length ? $("div", {class: "mute"}, "+" + (selS.domain_count - selS.domains.length) + " more") : null),
+      $("div", null, $("div", {class: "k"}, "Served by"), kv("Server groups", selS.server_groups.join(", ") || null), kv("App Connector groups", (selS.connector_group_ids || []).map(cgName).join(", ") || null), kv("App Connectors", selS.connectors == null ? null : selS.connectors_healthy + " of " + selS.connectors + " connected", selS.connectors && !selS.connectors_healthy ? "crit" : ""),
+        $("div", {class: "k", style: "margin-top:10px"}, "Rules that match, in order"), (selS.rules || []).length ? selS.rules.map(r => $("div", null, r.order + ". " + r.name + " ", $("span", {class: r.action === "ALLOW" ? "ok" : "crit"}, r.action === "ALLOW" ? "Allow" : "Deny"))) : $("div", {class: "mute"}, "None: blocked by default"))),
+    selS.findings.map(f => $("div", {class: lv[f.level][1], style: "margin-top:6px"}, lv[f.level][0] + " " + f.text)));
+  const apps = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Applications"), $("span", {class: "mute"}, d.segment_groups.length + " segment groups · " + d.server_groups.length + " server groups")),
+    !d.segments_known ? $("div", {class: "empty"}, "App segments could not be read with this API client.") : [segDetail,
+      $("label", {for: "zpq", style: "max-width:420px;margin-bottom:10px"}, "Search name, domain, port, group", $("input", {id: "zpq", type: "search", value: zp.q, autocomplete: "off", spellcheck: "false", oninput: ev => { zp.q = ev.target.value; render(); }})),
+      $("div", {class: "mute", role: "status", style: "margin-bottom:6px"}, list.length + " of " + segs.length + " app segments" + (list.length > max ? ", showing the first " + max : "")),
+      list.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["App segment", "Status", "Domains", "Ports", "Segment group", "App Connectors", "First matching rule", "Checks"].map(h => $("th", null, h)))),
+        $("tbody", null, list.slice(0, max).map(x => { const r = (x.rules || [])[0]; return $("tr", {style: x.enabled ? "" : "opacity:.6"},
+          $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (zp.seg === x.id ? ";border-color:var(--accent)" : ""), "aria-pressed": zp.seg === x.id ? "true" : "false", onclick: () => { zp.seg = zp.seg === x.id ? "" : x.id; render(); }}, x.name || "(unnamed)")),
+          $("td", null, x.enabled ? "Enabled" : "Disabled"), $("td", {class: "mono", style: "white-space:normal;min-width:200px"}, few(x.domains, 2) + (x.domain_count > x.domains.length && x.domains.length <= 2 ? "" : "")), $("td", {class: "mono mute"}, [x.tcp && "TCP " + x.tcp, x.udp && "UDP " + x.udp].filter(Boolean).join(" · ") || dash), $("td", null, x.group || dash),
+          $("td", {class: "mono " + (x.connectors && !x.connectors_healthy ? "crit" : "")}, x.connectors == null ? dash : x.connectors_healthy + " / " + x.connectors),
+          $("td", null, r ? [r.order + ". " + r.name + " ", $("span", {class: r.action === "ALLOW" ? "ok" : "crit"}, r.action === "ALLOW" ? "Allow" : "Deny")] : $("span", {class: "mute"}, "None")), $("td", null, marks(x))); })))) : $("div", {class: "empty"}, segs.length ? "No app segments match." : "No app segments.")]);
+
+  /* users and identity */
+  const uq = zp.uq.trim().toLowerCase(), ulist = (d.users || []).filter(u => !uq || u.name.toLowerCase().includes(uq) || u.devices.some(x => x.name.toLowerCase().includes(uq)));
+  const usedGroups = (d.groups || []).filter(g => g.rules);
+  const users = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Users and identity")),
+    d.users == null ? $("div", {class: "empty"}, "Users could not be read. ZPA has no user list of its own; this page reads enrolled devices from Client Connector, which this API client is not allowed to read.") : [
+      $("label", {for: "zpuq", style: "max-width:420px;margin-bottom:10px"}, "Search user or device", $("input", {id: "zpuq", type: "search", value: zp.uq, autocomplete: "off", spellcheck: "false", oninput: ev => { zp.uq = ev.target.value; render(); }})),
+      $("div", {class: "mute", role: "status", style: "margin-bottom:6px"}, ulist.length + " of " + d.users.length + " users with an enrolled device" + (ulist.length > 200 ? ", showing the first 200" : "")),
+      ulist.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["User", "Devices", "Private Access", "Device names", "Client version", "Last seen"].map(h => $("th", null, h)))),
+        $("tbody", null, ulist.slice(0, 200).map(u => $("tr", null, $("td", {style: "font-weight:500"}, u.name), $("td", {class: "mono"}, u.devices.length),
+          $("td", {class: u.zpa ? "ok" : "mute"}, u.zpa ? "● On for " + u.zpa + " of " + u.devices.length : "○ Off"), $("td", {style: "white-space:normal;min-width:200px"}, few(u.devices.map(x => x.name || "(unnamed)"), 3)),
+          $("td", {class: "mono mute"}, few(Array.from(new Set(u.devices.map(x => x.version).filter(Boolean))), 2) || dash), $("td", {class: "mono mute"}, u.last_seen ? ago(u.last_seen) + " ago" : dash)))))) : $("div", {class: "empty"}, "No users match.")],
+    $("div", {class: "grid2", style: "margin-top:16px"},
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Identity providers"), d.idps == null ? $("div", {class: "mute"}, "Not readable with this API client.") : d.idps.length ? simpleTable(["Name", "Status", "Sign-in for", "Group sync", "Groups"], d.idps.map(i => [i.name, i.enabled ? "Enabled" : "Disabled", i.sso || dash, i.scim ? "On" : "Off", i.groups == null ? dash : String(i.groups)])) : $("div", {class: "mute"}, "None configured.")),
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Groups used by access rules (" + usedGroups.length + " of " + (d.groups_total || 0) + ")"), usedGroups.length ? simpleTable(["Group", "Identity provider", "Rules"], usedGroups.slice(0, 60).map(g => [g.name, g.idp, String(g.rules)])) : $("div", {class: "mute"}, "No synced group is named in an access rule."))),
+    $("p", {class: "note"}, "Users here are people with a Client Connector device and whether Private Access is switched on for it. Which applications each user reached is only in ZPA’s log stream, not its API."));
+
+  /* telemetry */
+  const hhmm = n => n == null ? "" : " " + String(Math.floor(n / 3600)).padStart(2, "0") + ":" + String(Math.floor(n % 3600 / 60)).padStart(2, "0");
+  const telemetry = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Telemetry · connectors and logging")),
+    conns.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["App Connector", "Group", "Status", "Connected for", "Version", "Platform", "Private IP", "Public IP", "Zscaler data center"].map(h => $("th", null, h)))),
+      $("tbody", null, conns.map(c => $("tr", null, $("td", {style: "font-weight:500"}, c.name), $("td", null, c.group || dash), $("td", {class: c.healthy ? "ok" : c.enabled ? "crit" : "mute"}, (c.healthy ? "● " : c.enabled ? "✕ " : "○ ") + (c.enabled ? c.status : "Disabled")),
+        $("td", {class: "mono mute"}, c.healthy && c.connected_since ? ago(c.connected_since) : dash), $("td", {class: "mono " + (c.expected && c.expected !== c.version ? "warn" : "mute")}, (c.version || dash) + (c.expected && c.expected !== c.version ? " → " + c.expected : "")),
+        $("td", {class: "mute"}, c.platform || dash), $("td", {class: "mono mute"}, c.private_ip || dash), $("td", {class: "mono mute"}, c.public_ip || dash), $("td", null, c.broker || dash)))))) : $("div", {class: "empty"}, "No App Connectors."),
+    $("div", {class: "grid2", style: "margin-top:16px"},
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "App Connector groups"), d.connector_groups.length ? simpleTable(["Group", "Location", "Connectors", "Version profile", "Upgrade window"], d.connector_groups.map(g => { const mine = conns.filter(c => c.group_id === g.id); return [g.name + (g.enabled ? "" : " (disabled)"), g.location || dash, mine.filter(c => c.healthy).length + " / " + mine.length, g.profile || dash, (g.upgrade_day + hhmm(g.upgrade_secs)).trim() || dash]; })) : $("div", {class: "mute"}, "None readable.")),
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Log receivers (log streaming)"), d.lss == null ? $("div", {class: "mute"}, "Not readable with this API client.") : d.lss.length ? simpleTable(["Name", "Log type", "Sends to", "Status"], d.lss.map(x => [x.name, x.type || dash, x.host ? x.host + ":" + x.port + (x.tls ? " (TLS)" : "") : dash, x.enabled ? "Enabled" : "Disabled"])) : $("div", {class: "mute"}, "None. User sessions and app usage are not being exported anywhere."),
+        d.edges.length ? [$("div", {style: "font-weight:600;margin:16px 0 8px"}, "Private Service Edges"), simpleTable(["Name", "Group", "Status", "Version", "Public IP"], d.edges.map(e => [e.name, e.group || dash, (e.healthy ? "● " : "✕ ") + e.status, e.version || dash, e.public_ip || dash]))] : null)),
+    $("p", {class: "note"}, "Configuration was read " + ago(d.read_at) + " ago and refreshes every 5 minutes; connector status refreshes every poll." + (d.notes.length ? " Not available with this API client: " + d.notes.join("; ") + "." : "")));
+  return [tiles, diag, policy, apps, users, telemetry];
 }
 
 /* ---------- Zero Trust Branch ---------- */
