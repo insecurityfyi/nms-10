@@ -110,8 +110,14 @@ def normalize(cfg):
     out["snmp"]["devices"] = devices[:500]
     fw = out["firewalla"]
     fw["domain"] = fw["domain"].lower().split("://", 1)[-1].split("/", 1)[0].strip()
-    b = out["ztb"]  # accept 'acme-api', 'acme-api.goairgap.com' or a pasted https:// URL
-    b["cloud"] = b["cloud"].lower().split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].split(".goairgap.com", 1)[0].strip(". ")
+    b = out["ztb"]  # 'acme-api', 'acme-api.goairgap.com', or a full API address on another host
+    host, _, path = b["cloud"].strip().split("://", 1)[-1].partition("/")
+    host = host.lower().strip(". ")
+    if host.endswith(".goairgap.com") or "." not in host:
+        b["cloud"] = host.split(":", 1)[0].split(".goairgap.com", 1)[0]
+    else:  # any other API address is kept whole, always https
+        path = path.split("/api/v", 1)[0].strip("/")  # drop a pasted endpoint path, keep a product prefix
+        b["cloud"] = "https://" + host + ("/" + path if path else "")
     z = out["zscaler"]
     z["vanity"], cloud_hint = _clean_vanity(z["vanity"])
     cloud = (z["cloud"] or cloud_hint).lower().strip(". ")
