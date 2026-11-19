@@ -947,15 +947,16 @@ async def collect_zscaler(cfg):
 # Every data call below is a GET.
 
 _ztb_tokens = {}
-ZTB_MAX_SITES, ZTB_MAX_DEVICES = 20, 2000
+ZTB_MAX_SITES, ZTB_MAX_DEVICES = 20, 2000  # sites: cap on per-site overview fallbacks
 
 
 def _ztb_base(cloud):
-    return f"https://{cloud}.goairgap.com"
+    """`cloud` is either a full https:// API address or the tenant label before .goairgap.com."""
+    return cloud if cloud.startswith("https://") else f"https://{cloud}.goairgap.com"
 
 
 def _ztb_oneapi_base(cloud):
-    return (f"https://api.{cloud}.zsapi.net" if cloud else "https://api.zsapi.net") + "/ztb"
+    return f"https://api.{cloud}.zsapi.net" if cloud else "https://api.zsapi.net"
 
 
 def _ztb_items(body):
@@ -1028,16 +1029,16 @@ async def collect_ztb(cfg):
     if direct and not (b["cloud"] and b["api_key"]):
         return {"configured": True, "ok": False, "error":
                 "Enter both the tenant and the API key, or leave both blank to use the Zscaler OneAPI client."}
-    if direct and not LABEL_RE.match(b["cloud"]):
+    if direct and not (b["cloud"].startswith("https://") or LABEL_RE.match(b["cloud"])):
         return {"configured": True, "ok": False,
-                "error": "Tenant should be the part before .goairgap.com, for example acme-api"}
+                "error": "API address should be a full https:// address, or the part before .goairgap.com"}
     if not direct:
         if not (z["vanity"] and z["client_id"] and z["client_secret"]):
             return {"configured": True, "ok": False, "error":
                     "Fill in the Zscaler OneAPI client in Settings, or enter a Zero Trust Branch tenant and API key."}
         if not (LABEL_RE.match(z["vanity"]) and LABEL_RE.match(z["cloud"])):
             return {"configured": True, "ok": False, "error": "Check the Zscaler vanity domain"}
-    base = _ztb_base(b["cloud"]) if direct else _ztb_oneapi_base(z["cloud"])
+    root = base = _ztb_base(b["cloud"]) if direct else _ztb_oneapi_base(z["cloud"])
     key = (b["cloud"], hashlib.sha256(b["api_key"].encode()).hexdigest())
     out = {"configured": True, "ok": True, "error": "", "tenant": b["cloud"] if direct else z["vanity"],
            "via": "API key" if direct else "OneAPI", "notes": [],
@@ -1054,9 +1055,9 @@ async def collect_ztb(cfg):
                 hint = (" Check the API key." if direct else " Check the Zscaler client ID and secret.") if e.response.status_code in (400, 401, 403) else ""
                 return {"configured": True, "ok": False, "error": "Sign-in failed: " + _err(e) + "." + hint}
             except httpx.ConnectError as e:
-                host = f"{b['cloud']}.goairgap.com" if direct else f"{z['vanity']}.zslogin{z['cloud']}.net"
+                host = _ztb_base(b["cloud"]).split("://", 1)[1] if direct else f"{z['vanity']}.zslogin{z['cloud']}.net"
                 return {"configured": True, "ok": False, "error":
-                        f"Sign-in failed: cannot reach {host} ({str(e)[:80]}). Check the tenant name."}
+                        f"Sign-in failed: cannot reach {host} ({str(e)[:80]}). Check the API address."}
 
             async def get(path, params=None):
                 for attempt in (0, 1):
@@ -1077,54 +1078,87 @@ async def collect_ztb(cfg):
                     out["notes"].append(f"{label}: {type(e).__name__}")
                 return None
 
-            # Sites, then each site's overview for its gateways (the branch appliances).
-            try:
-                first = await get("/api/v2/Site/", {"page": 1, "limit": 200})
-            except httpx.HTTPStatusError as e:
-                if direct or e.response.status_code not in (401, 403, 404):
-                    raise
+            # Sites. /Site/names is what Zscaler's own console calls; /Site/ is the SDK's list. Under OneAPI
+            # the product prefix is not documented, so try both spellings before giving up.
+            async def site_list():
+                try:
+                    return await get("/api/v2/Site/names")
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (401, 403):
+                        raise
+                    return await get("/api/v2/Site/", {"page": 1, "limit": 200})
+
+            tried = []
+            for prefix in ([""] if direct else ["/ztb", "/ztds"]):
+                base = root + prefix
+                try:
+                    first = await site_list()
+                    break
+                except httpx.HTTPStatusError as e:
+                    if direct:
+                        raise
+                    tried.append(f"{prefix} HTTP {e.response.status_code}")
+            else:
                 # OneAPI signed in but would not serve Zero Trust Branch: say what to try, not just the code
                 return {"configured": True, "ok": False, "error":
-                        f"Zscaler OneAPI did not serve Zero Trust Branch (HTTP {e.response.status_code} from /ztb/api/v2/Site/). "
-                        "Either the API client has no Zero Trust Branch role in ZIdentity, or this tenant only offers "
-                        "the separate Zero Trust Branch API key."}
+                        "Zscaler OneAPI did not serve Zero Trust Branch (" + ", ".join(tried) + "). Create a key under "
+                        "Zero Trust Branch API Keys in the Zscaler console and enter it here with the API address "
+                        "shown under Zero Trust Branch API Docs."}
             listed = [s for s in _ztb_items(first) if isinstance(s, dict)]
-            if len(listed) > ZTB_MAX_SITES:
-                out["notes"].append(f"gateway detail loaded for the first {ZTB_MAX_SITES} of {len(listed)} sites")
 
-            async def site(s, detailed):
+            def gateway(g, cluster=""):
+                st, color = str(g.get("operational_state") or ""), str(g.get("health_color") or "").lower()
+                bad = color == "red" or st.lower() in ("down", "offline", "inactive", "unreachable", "disconnected", "failed")
+                good = color == "green" or st.lower() in ("up", "active", "standby", "online", "running", "connected", "healthy")
+                ip = lambda k: "" if str(g.get(k) or "") in ("", "0.0.0.0") else str(g.get(k))  # noqa: E731
+                return {"id": str(g.get("gateway_id") or ""), "name": str(g.get("display_name") or g.get("gateway_name") or ""),
+                        "hostname": str(g.get("gateway_name") or ""), "cluster": str(cluster or g.get("cluster_id") or ""),
+                        "state": str(g.get("display_state") or st), "health": color,
+                        # True/False only when the API is unambiguous; None means "not sure", never alerted on
+                        "healthy": False if bad else True if good else None, "error": str(g.get("error") or "")[:200],
+                        "version": str(g.get("running_version") or ""), "serial": str(g.get("system_serial_tag") or ""),
+                        "ha": str(g.get("vrrp_state") or ""), "region": str(g.get("region") or ""),
+                        "ip": ip("gateway_ip_address"), "mgmt_ip": ip("mgmt_ip"), "vm_ip": ip("vm_ip_address"), "public_ip": ip("public_ip"),
+                        "updated": _ts(g.get("last_poll_updated") or g.get("updatedAt") or g.get("updated_at"))}
+
+            def site(s):
                 sid = str(s.get("id") or "")
-                rec = {"id": sid, "name": str(s.get("display_name") or s.get("name") or sid),
-                       "status": str(s.get("site_status") or ""), "type": str(s.get("gateway_type") or ""),
-                       "public_ip": str(s.get("public_ip") or ""), "template": "", "gateways": []}
-                if not (detailed and sid):
-                    return rec
-                body = await optional(f"site {rec['name']}", get(f"/api/v2/Site/siteByID/{sid}/overview"))
-                ov = body.get("result") if isinstance(body, dict) and isinstance(body.get("result"), dict) else body
-                if not isinstance(ov, dict):
-                    return rec
-                rec["template"] = str(ov.get("template_name") or "")
-                rec["status"] = str(ov.get("site_status") or rec["status"])
-                for cl in ov.get("clusters") or []:
-                    for g in (cl.get("gateways") or []) if isinstance(cl, dict) else []:
-                        if not isinstance(g, dict):
-                            continue
-                        st, color = str(g.get("operational_state") or ""), str(g.get("health_color") or "").lower()
-                        bad = color == "red" or st.lower() in ("down", "offline", "inactive", "unreachable", "disconnected", "failed")
-                        good = color == "green" or st.lower() in ("up", "active", "online", "running", "connected", "healthy")
-                        rec["gateways"].append({
-                            "id": str(g.get("gateway_id") or ""), "name": str(g.get("gateway_name") or ""),
-                            "cluster": str(cl.get("cluster_name") or ""), "state": st, "health": color,
-                            # True/False only when the API is unambiguous; None means "not sure", never alerted on
-                            "healthy": False if bad else True if good else None,
-                            "version": str(g.get("running_version") or ""), "serial": str(g.get("system_serial_tag") or ""),
-                            "ha": str(g.get("vrrp_state") or ""), "region": str(g.get("region") or ""),
-                            "ip": str(g.get("gateway_ip_address") or ""), "mgmt_ip": str(g.get("mgmt_ip") or ""),
-                            "vm_ip": str(g.get("vm_ip_address") or ""), "public_ip": str(g.get("public_ip") or ""),
-                            "updated": _ts(g.get("updated_at"))})
-                return rec
+                clusters = [str(c.get("cluster_id")) for c in (s.get("cluster_info") or s.get("clusters") or [])
+                            if isinstance(c, dict) and c.get("cluster_id") is not None]
+                return {"id": sid, "name": str(s.get("display_name") or s.get("name") or sid), "key": str(s.get("name") or ""),
+                        "status": str(s.get("site_status") or ""), "type": str(s.get("gateway_type") or ""),
+                        "health": str(s.get("rks_level") or ""), "public_ip": str(s.get("public_ip") or ""),
+                        "clusters": clusters, "gateways": []}
 
-            out["sites"] = list(await asyncio.gather(*(site(s, i < ZTB_MAX_SITES) for i, s in enumerate(listed))))
+            out["sites"] = [site(s) for s in listed]
+            # Gateways (the branch appliances): one list call, joined to sites by cluster id.
+            gw_rows = await optional("gateways", get("/api/v2/Gateway/"))
+            if gw_rows is not None:
+                by_cluster = {c: st for st in out["sites"] for c in st["clusters"]}
+                loose = []
+                for g in _ztb_items(gw_rows):
+                    if isinstance(g, dict):
+                        home = by_cluster.get(str(g.get("cluster_id")))
+                        (home["gateways"] if home else loose).append(gateway(g))
+                if loose:
+                    out["sites"].append({"id": "", "name": "Not assigned to a site", "key": "", "status": "", "type": "",
+                                         "health": "", "public_ip": "", "clusters": [], "gateways": loose})
+            else:
+                # Fall back to each site's overview, which nests gateways under clusters.
+                async def overview(rec):
+                    body = await optional(f"site {rec['name']}", get(f"/api/v2/Site/siteByID/{rec['id']}/overview"))
+                    ov = body.get("result") if isinstance(body, dict) and isinstance(body.get("result"), dict) else body
+                    for cl in (ov.get("clusters") or []) if isinstance(ov, dict) else []:
+                        for g in (cl.get("gateways") or []) if isinstance(cl, dict) else []:
+                            if isinstance(g, dict):
+                                rec["gateways"].append(gateway(g, cl.get("cluster_name")))
+                await asyncio.gather(*(overview(r) for r in out["sites"][:ZTB_MAX_SITES] if r["id"]))
+
+            # The console's own summary counts; used when a list below is not available.
+            tiles = await optional("summary counts", get("/api/v2/dashboard/tiles-info"))
+            tiles = tiles.get("result") if isinstance(tiles, dict) and isinstance(tiles.get("result"), dict) else {}
+            out["counts"] = {k: tiles.get(k + "_count") for k in ("devices", "users", "networks", "threats", "policies")
+                             if isinstance(tiles.get(k + "_count"), int)}
             site_names = {s["id"]: s["name"] for s in out["sites"]}
 
             # Devices seen at the branches (and the directory users signed in on them).
@@ -1165,14 +1199,19 @@ async def collect_ztb(cfg):
                         x["last_seen"] = rec["last_seen"]
             out["users"] = sorted(users.values(), key=lambda u: u["name"].lower())
 
-            rows = await optional("alarms", get("/api/v2/alarm", {"page": 1, "size": 100}))
+            rows = await optional("alarms", get("/api/v2/alarm", {"size": 100, "tab": "active"}))
             if rows is not None:
+                pick = lambda a, *ks: next((str(a[k]) for k in ks if a.get(k) not in (None, "")), "")  # noqa: E731
                 out["alarms"] = [{
-                    "id": str(a.get("alarmId") or ""), "ts": _ts(a.get("createdAt")), "severity": str(a.get("severity") or ""),
-                    "status": str(a.get("status") or ""), "service": str(a.get("service") or ""),
-                    "message": str(a.get("description") or "")[:240], "action": str(a.get("recommendedAction") or "")[:240],
-                    "site": str(a.get("siteName") or ""), "gateway": str(a.get("gatewayName") or ""),
-                    "network": str(a.get("networkName") or "")} for a in _ztb_items(rows)[:100] if isinstance(a, dict)]
+                    "id": pick(a, "alarm_id", "alarmId"), "ts": _ts(a.get("createdAt") or a.get("created_at")),
+                    "severity": pick(a, "severity"), "status": pick(a, "status"), "service": pick(a, "service"),
+                    "message": pick(a, "description")[:240], "action": pick(a, "recommended_action", "recommendedAction")[:240],
+                    "site_id": pick(a, "site_id", "siteId"), "site": pick(a, "site_name", "siteName"),
+                    "gateway": pick(a, "gateway_name", "gatewayName"),
+                    "network": pick(a, "network_name", "networkName")} for a in _ztb_items(rows)[:100] if isinstance(a, dict)]
+                res = rows.get("result") if isinstance(rows, dict) else None
+                total = res.get("totalAlarmsCount") if isinstance(res, dict) else None
+                out["alarms_total"] = total if isinstance(total, int) else len(out["alarms"])
         return out
     except Exception as e:  # noqa: BLE001
         return {"configured": True, "ok": False, "error": _err(e)}

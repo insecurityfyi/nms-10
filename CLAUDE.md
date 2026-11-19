@@ -19,7 +19,10 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
     `/api/v2/Site/`, `/api/v2/Site/siteByID/<id>/overview`, `/api/v2/devices/active`, `/api/v2/alarm`.
     With tenant and key blank it sends the same paths through OneAPI (`https://api.zsapi.net/ztb/api/v2/...`,
     the SDK's `ZTBService` route) with the Zscaler client; unverified, so a refusal is reported with a hint.
-    Paths and field names come from Zscaler's Python SDK (`zscaler/ztb`). It reports no bandwidth, so the
+    The Zscaler console itself calls `api.zsapi.net/private/ztds/api/v2/{Site/names,Gateway/,alarm,dashboard/tiles-info}`
+    (seen in a HAR from a real tenant, 8.3.0); the collector uses those paths and response shapes, joining gateways
+    to sites by `cluster_id`. The API address field takes a full https address or a `goairgap.com` tenant label.
+    Device-list paths and field names still come from Zscaler's Python SDK (`zscaler/ztb`). It reports no bandwidth, so the
     Zero Trust Branch page (`vZtb`) joins each gateway to an SNMP device by IP or name for throughput and
     utilization (`ifHighSpeed`). The older `ztw` source is Cloud & Branch Connector, a different product.
 - `app/store.py` - SQLite + Fernet-encrypted settings, admin password, sessions

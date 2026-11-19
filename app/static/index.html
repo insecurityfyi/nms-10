@@ -614,7 +614,7 @@ function vZscaler() {
 const zb = {site: "", q: "", sel: ""};
 function ztbSnmpFor(g) {
   const norm = x => String(x || "").toLowerCase().split(".")[0], ips = [g.ip, g.mgmt_ip, g.vm_ip, g.public_ip].filter(Boolean);
-  return (src("snmp").devices || []).find(d => ips.includes(d.host) || (g.name && (norm(d.sys_name) === norm(g.name) || norm(d.name) === norm(g.name)))) || null;
+  return (src("snmp").devices || []).find(d => ips.includes(d.host) || [g.name, g.hostname].filter(Boolean).some(n => norm(d.sys_name) === norm(n) || norm(d.name) === norm(n))) || null;
 }
 function gwState(g) {
   const text = g.state || (g.health ? g.health.charAt(0).toUpperCase() + g.health.slice(1) : "Unknown");
@@ -650,24 +650,25 @@ function vZtb() {
   const gws = sites.reduce((a, site) => a.concat(site.gateways.map(g => ({g: g, site: site, d: ztbSnmpFor(g)}))), []);
   const devs = zb.site ? s.devices.filter(d => d.site_id === zb.site) : s.devices;
   const users = zb.site ? s.users.filter(u => u.sites.some(n => names.includes(n))) : s.users;
-  const alarms = s.alarms == null ? null : zb.site ? s.alarms.filter(a => names.includes(a.site)) : s.alarms;
+  const keys = sites.map(x => x.key).filter(Boolean), alarms = s.alarms == null ? null : zb.site ? s.alarms.filter(a => a.site_id ? a.site_id === zb.site : names.includes(a.site) || keys.includes(a.site)) : s.alarms;
+  const counts = s.counts || {}, noDevs = !s.devices.length && counts.devices > 0;
   const live = gws.filter(x => x.d && x.d.up && x.d.in_bps != null), down = gws.filter(x => x.g.healthy === false).length, quar = devs.filter(d => d.quarantined).length;
   const sum = k => live.reduce((t, x) => t + x.d[k], 0);
   const box = (k, v, unit, sub, cls) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v, unit && $("small", null, " " + unit)), $("div", {class: "s " + (cls || "mute")}, sub || " "));
   const tiles = $("section", {class: "tiles", "aria-label": "Zero Trust Branch totals"},
     box("Sites", sites.length, "", s.sites.length > sites.length ? "of " + s.sites.length : "Via " + (s.via || "API key") + " · " + s.tenant),
     box("Gateways", gws.length, "", !gws.length ? "None reported" : down ? "✕ " + down + " down" : "● None reported down", !gws.length ? "mute" : down ? "crit" : "ok"),
-    box("Devices", devs.length, "", quar ? "▲ " + quar + " quarantined" : "None quarantined", quar ? "warn" : "mute"),
-    box("Users", users.length, "", "Signed in on branch devices"),
-    box("Alarms", alarms == null ? dash : alarms.length, "", alarms == null ? "Not available" : alarms.length ? "▲ Review below" : "● None", alarms == null ? "mute" : alarms.length ? "warn" : "ok"),
+    box("Devices", noDevs ? counts.devices : devs.length, "", noDevs ? "Total only · list not available" : quar ? "▲ " + quar + " quarantined" : "None quarantined", quar ? "warn" : "mute"),
+    box("Users", users.length || (zb.site ? 0 : counts.users || 0), "", "Signed in on branch devices"),
+    box("Active alarms", alarms == null ? dash : !zb.site && s.alarms_total > alarms.length ? s.alarms_total : alarms.length, "", alarms == null ? "Not available" : alarms.length ? "▲ Review below" : "● None", alarms == null ? "mute" : alarms.length ? "warn" : "ok"),
     box("Bandwidth in", live.length ? bps(sum("in_bps")) : dash, "", live.length ? "Out " + bps(sum("out_bps")) + " · SNMP on " + live.length + " of " + gws.length + " gateways" : "No SNMP data yet"));
   const picker = s.sites.length > 1 ? $("section", {class: "card"}, $("label", {for: "zbsite", style: "max-width:360px"}, "Branch site", $("select", {id: "zbsite", onchange: ev => { zb.site = ev.target.value; zb.sel = ""; render(); }},
     $("option", {value: "", selected: !zb.site}, "All sites (" + s.sites.length + ")"), s.sites.map(x => $("option", {value: x.id, selected: zb.site === x.id}, x.name))))) : null;
   const branch = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Branch sites and gateways")),
     $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Site", "Site status", "Gateway", "State", "HA role", "Version", "Management IP", "Public IP", "Serial", "Devices"].map(h => $("th", null, h)))),
       $("tbody", null, sites.map(site => { const n = s.devices.filter(d => d.site_id === site.id).length, rows = site.gateways.length ? site.gateways : [null];
-        return rows.map((g, i) => $("tr", null, $("td", {style: "font-weight:500"}, i ? "" : site.name, !i && site.type ? $("span", {class: "mute"}, "  " + site.type) : null), $("td", null, i ? "" : site.status || dash),
-          g ? [$("td", {style: "font-weight:500"}, g.name || g.id || dash), $("td", null, gwState(g)), $("td", null, g.ha || dash), $("td", {class: "mono mute"}, g.version || dash), $("td", {class: "mono mute"}, g.mgmt_ip || g.ip || dash), $("td", {class: "mono mute"}, g.public_ip || site.public_ip || dash), $("td", {class: "mono mute"}, g.serial || dash)]
+        return rows.map((g, i) => $("tr", null, $("td", {style: "font-weight:500"}, i ? "" : site.name, !i && site.type ? $("span", {class: "mute"}, "  " + site.type) : null), $("td", {class: i ? "" : site.health === "red" ? "crit" : site.health === "green" ? "ok" : ""}, i ? "" : site.status || dash),
+          g ? [$("td", {style: "font-weight:500"}, g.name || g.id || dash), $("td", null, gwState(g), g.error ? $("div", {class: "warn", style: "white-space:normal;max-width:260px"}, g.error) : null), $("td", null, g.ha || dash), $("td", {class: "mono mute"}, g.version || dash), $("td", {class: "mono mute"}, g.mgmt_ip || g.ip || dash), $("td", {class: "mono mute"}, g.public_ip || site.public_ip || dash), $("td", {class: "mono mute"}, g.serial || dash)]
             : [$("td", {class: "mute", colspan: "7"}, "No gateway detail reported")], $("td", {class: "mono"}, i ? "" : n))); })))),
     s.notes.length ? $("p", {class: "note"}, "Not available from your tenant: " + s.notes.join("; ") + ".") : null);
 
@@ -702,7 +703,7 @@ function vZtb() {
         $("td", {class: d.quarantined ? "crit" : ""}, d.quarantined ? "✕ Quarantined" : d.status || dash), $("td", {class: "mono"}, d.posture == null ? dash : d.posture), $("td", {class: "mono mute"}, d.last_seen ? ago(d.last_seen) + " ago" : dash)); })))) : $("div", {class: "empty"}, devs.length ? "No devices match." : "No devices reported."));
 
   const sev = a => /crit|high|major|emerg/i.test(a.severity) ? "crit" : /warn|med|minor/i.test(a.severity) ? "warn" : "mute";
-  const alarmCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Telemetry · alarms"), alarms && s.alarms.length >= 100 ? $("span", {class: "mute"}, "Newest 100") : null),
+  const alarmCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Telemetry · alarms"), alarms && s.alarms_total > s.alarms.length ? $("span", {class: "mute"}, "Showing " + s.alarms.length + " of " + s.alarms_total + " active") : null),
     alarms == null ? $("div", {class: "empty"}, "Alarms could not be read from this tenant.")
       : alarms.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["When", "Severity", "Alarm", "Service", "Site", "Gateway", "Status"].map(h => $("th", null, h)))),
         $("tbody", null, alarms.map(a => $("tr", null, $("td", {class: "mono mute"}, a.ts ? ago(a.ts) + " ago" : dash), $("td", {class: sev(a), style: "font-weight:600"}, a.severity || dash),
@@ -783,8 +784,8 @@ function renderSettings() {
     $("section", {class: "card"}, $("h2", null, "Zscaler"), $("p", {class: "note"}, "Uses a OneAPI client from ZIdentity with read-only roles. The vanity domain is the first part of your ZIdentity sign-in address, for example acme in acme.zslogin.net."),
       $("div", {class: "form"}, field(S.zscaler, "enabled", "Enabled", {type: "checkbox"}), field(S.zscaler, "vanity", "Vanity domain (before .zslogin.net)", {placeholder: "acme"}), field(S.zscaler, "cloud", "Cloud (blank for production)", {placeholder: "blank, or beta"}), field(S.zscaler, "client_id", "Client ID"), field(S.zscaler, "client_secret", "Client secret", pw), field(S.zscaler, "zpa_customer_id", "ZPA customer ID")),
       $("div", {class: "form"}, field(S.zscaler, "zia", "ZIA", {type: "checkbox"}), field(S.zscaler, "zpa", "ZPA", {type: "checkbox"}), field(S.zscaler, "zdx", "ZDX", {type: "checkbox"}), field(S.zscaler, "aiguard", "AI Security (AI Guard)", {type: "checkbox"}), field(S.zscaler, "ztw", "Cloud & Branch Connector", {type: "checkbox"}), field(S.zscaler, "zins", "Analytics (Z-Insights)", {type: "checkbox"}))),
-    $("section", {class: "card"}, $("h2", null, "Zscaler Zero Trust Branch"), $("p", {class: "note"}, "Zero Trust Branch (formerly Airgap). If you manage it inside the main Zscaler console, tick Enabled and leave Tenant and API key blank: it then uses the OneAPI client above. If you have a separate address ending in .goairgap.com, enter its first part as the tenant (for example acme-api) with an API key from that portal. Bandwidth comes from SNMP: add each branch appliance under SNMP devices."),
-      $("div", {class: "form"}, field(S.ztb, "enabled", "Enabled", {type: "checkbox"}), field(S.ztb, "cloud", "Tenant (blank to use OneAPI)", {placeholder: "blank, or acme-api"}), field(S.ztb, "api_key", "API key (blank to use OneAPI)", pw))),
+    $("section", {class: "card"}, $("h2", null, "Zscaler Zero Trust Branch"), $("p", {class: "note"}, "Zero Trust Branch (formerly Airgap). In the Zscaler console, create a key under Zero Trust Branch API Keys and copy the API address shown under Zero Trust Branch API Docs; paste both here. A tenant name on its own (for example acme-api) is read as acme-api.goairgap.com. Leaving both blank tries the OneAPI client above, which most tenants do not serve. Bandwidth comes from SNMP: add each branch appliance under SNMP devices."),
+      $("div", {class: "form"}, field(S.ztb, "enabled", "Enabled", {type: "checkbox"}), field(S.ztb, "cloud", "API address", {placeholder: "https://… from Zero Trust Branch API Docs"}), field(S.ztb, "api_key", "API key", pw))),
     $("div", {style: "display:flex;align-items:center;gap:14px;flex-wrap:wrap"}, $("button", {class: "primary", type: "button", onclick: ev => { ev.target.disabled = true; saveSettings(); }}, "Save settings"), msg, $("span", {class: "mute"}, "Stored secrets show as ******** and are kept unless you type over them.")));
   saveMsg = "";
 }
