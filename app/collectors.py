@@ -917,18 +917,150 @@ async def _ztw(c, base, tok):
     return {"groups": groups}
 
 
+_zdx_cache = {}
+ZDX_DETAIL_TTL = 600   # per-app history and alert detail are re-read at most this often (tight rate limits)
+ZDX_MAX_APPS = 10      # apps that get score history and metrics, worst score first
+
+
+def _zdx_series(body):
+    """[(metric, unit, [(ts, value), ...])] from a ZDX time-series reply (a list or one object)."""
+    out = []
+    for m in (body if isinstance(body, list) else [body] if isinstance(body, dict) else []):
+        if not isinstance(m, dict):
+            continue
+        pts = [(d.get("timestamp"), d.get("value")) for d in m.get("datapoints") or [] if isinstance(d, dict)
+               and isinstance(d.get("value"), (int, float)) and d["value"] >= 0]
+        out.append((str(m.get("metric") or ""), str(m.get("unit") or ""), pts))
+    return out
+
+
+def _zdx_place(v):
+    if not isinstance(v, dict):
+        return ""
+    return ", ".join(str(v[k]) for k in ("city", "state", "region", "country") if v.get(k))[:80] or str(v.get("name") or "")
+
+
+def _zdx_groups(items):
+    """'New York (12), Lab (3)' from an alert's locations / departments / geolocations."""
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and it.get("name"):
+            out.append({"name": str(it["name"])[:80], "devices": it.get("num_devices") if isinstance(it.get("num_devices"), int) else None})
+    return out[:12]
+
+
+def zdx_diagnose(apps, alerts):
+    """What stands out in the ZDX data already read; worst first."""
+    found = []
+    add = lambda level, kind, subject, text: found.append({"level": level, "kind": kind, "subject": subject, "text": text})  # noqa: E731
+    for a in alerts or []:
+        where = ", ".join(g["name"] for g in (a["locations"] or a["geo"])[:3])
+        since = f"Ongoing since {time.strftime('%d %b %H:%M', time.gmtime(a['started']))} UTC" if a["started"] else "Ongoing"
+        add("crit" if str(a["severity"]).lower() in ("critical", "high") else "warn", "alert", a["rule"] or "Alert",
+            since + (f" for {a['app']}" if a["app"] else "") + (f", {a['devices']} devices affected" if a["devices"] else "")
+            + (f" ({where})" if where else "") + ".")
+    for a in apps:
+        sc = a["score"]
+        if sc is None:
+            if not a["users"]:
+                add("info", "application", a["name"], "No score: no users are being measured for this application.")
+            continue
+        if sc < 34:
+            add("crit", "application", a["name"], f"Poor experience: score {sc}.")
+        elif sc < 66:
+            add("warn", "application", a["name"], f"Fair experience: score {sc}.")
+        if a.get("avg") is not None and a["avg"] - sc >= 15:
+            add("warn", "application", a["name"], f"Score dropped to {sc} from a 24-hour average of {a['avg']}.")
+        elif a.get("low") is not None and a["low"] < 34 <= sc:
+            add("info", "application", a["name"], f"Recovered: score fell as low as {a['low']} in the last 24 hours.")
+        total = (a["poor"] or 0) + (a["okay"] or 0) + (a["good"] or 0)
+        if total >= 4 and (a["poor"] or 0) * 4 >= total and sc >= 34:
+            add("warn", "application", a["name"], f"{a['poor']} of {total} measured users have a poor experience even though the overall score is {sc}.")
+        if a["region"] and sc < 66:
+            add("info", "application", a["name"], f"Most affected region: {a['region']}.")
+    rank = {"crit": 0, "warn": 1, "info": 2}
+    found.sort(key=lambda f: rank[f["level"]])
+    return found
+
+
 async def _zdx(c, base, tok):
+    root = f"{base}/zdx/v1"
     apps = []
-    for a in _as_list(await _zs_get(c, f"{base}/zdx/v1/apps", tok), "apps"):
-        score = a.get("score")
-        apps.append({"name": a.get("name") or "", "users": a.get("total_users"),
-                     "score": round(score) if isinstance(score, (int, float)) and score >= 0 else None})
+    for a in _as_list(await _zs_get(c, f"{root}/apps", tok), "apps"):
+        if not isinstance(a, dict):
+            continue
+        score, st = a.get("score"), a.get("stats") if isinstance(a.get("stats"), dict) else {}
+        n = lambda k: st.get(k) if isinstance(st.get(k), int) else None  # noqa: E731
+        apps.append({"id": str(a.get("id") or ""), "name": a.get("name") or "", "users": a.get("total_users"),
+                     "score": round(score) if isinstance(score, (int, float)) and score >= 0 else None,
+                     "active_users": n("active_users"), "active_devices": n("active_devices"),
+                     "poor": n("num_poor"), "okay": n("num_okay"), "good": n("num_good"),
+                     "region": _zdx_place(a.get("most_impacted_region")), "avg": None, "low": None, "metrics": []})
     scored = [a["score"] for a in apps if a["score"] is not None]
     out = {"apps": apps, "score": round(sum(scored) / len(scored)) if scored else None, "alerts": None}
-    try:
-        out["alerts"] = len(_as_list(await _zs_get(c, f"{base}/zdx/v1/alerts/ongoing", tok), "alerts"))
-    except httpx.HTTPError:
-        pass
+
+    hit = _zdx_cache.get(base)
+    if hit and hit["t"] > time.time() - ZDX_DETAIL_TTL:
+        d = hit["d"]
+    else:
+        d = {"notes": [], "read_at": time.time(), "history": {}, "ongoing": None, "recent": None}
+        limited = []
+
+        async def opt(label, url, params=None):
+            if limited:
+                return None
+            try:
+                return await _zs_get(c, url, tok, params)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    limited.append(1)
+                    d["notes"].append("Zscaler rate limit reached; some history was skipped")
+                elif label:
+                    d["notes"].append(f"{label}: HTTP {e.response.status_code}")
+            except (httpx.HTTPError, ValueError) as e:
+                if label:
+                    d["notes"].append(f"{label}: {type(e).__name__}")
+            return None
+
+        def alert(a, ongoing):
+            app = a.get("application") if isinstance(a.get("application"), dict) else {}
+            groups = {k: _zdx_groups(a.get(k)) for k in ("locations", "departments", "geolocations")}
+            dev = [g["devices"] for g in groups["locations"] or groups["geolocations"] if g["devices"] is not None]
+            return {"id": str(a.get("id") or ""), "rule": str(a.get("rule_name") or "")[:160], "severity": str(a.get("severity") or ""),
+                    "type": str(a.get("alert_type") or "").replace("_", " ").title(), "status": str(a.get("alert_status") or ("ONGOING" if ongoing else "")).title(),
+                    "app": str(app.get("name") or ""), "started": _ts(a.get("started_on")), "ended": _ts(a.get("ended_on")),
+                    "locations": groups["locations"], "departments": groups["departments"], "geo": groups["geolocations"],
+                    "devices": sum(dev) if dev else None}
+
+        body = await opt("ongoing alerts", f"{root}/alerts/ongoing")
+        if body is not None:
+            d["ongoing"] = [alert(a, True) for a in _as_list(body, "alerts")[:100] if isinstance(a, dict)]
+        body = await opt("recent alerts", f"{root}/alerts/historical", {"since": 24})
+        if body is not None:
+            d["recent"] = [alert(a, False) for a in _as_list(body, "alerts")[:50] if isinstance(a, dict)]
+        # Score history and metrics for the apps that most need a look (two calls each).
+        worst = sorted([a for a in apps if a["id"] and a["score"] is not None], key=lambda a: a["score"])[:ZDX_MAX_APPS]
+        for a in worst:
+            h = {"avg": None, "low": None, "metrics": []}
+            body = await opt("", f"{root}/apps/{a['id']}/score", {"since": 24})
+            pts = [v for _, _, series in _zdx_series(body) for _, v in series]
+            if pts:
+                h["avg"], h["low"] = round(sum(pts) / len(pts)), round(min(pts))
+            body = await opt("", f"{root}/apps/{a['id']}/metrics", {"since": 24})
+            for metric, unit, series in _zdx_series(body):
+                vals = [v for _, v in series]
+                if metric and vals:
+                    h["metrics"].append({"name": metric, "unit": unit, "last": round(vals[-1], 1), "avg": round(sum(vals) / len(vals), 1),
+                                         "max": round(max(vals), 1)})
+            d["history"][a["id"]] = h
+        _zdx_cache.clear()
+        _zdx_cache[base] = {"t": time.time(), "d": d}
+
+    for a in apps:
+        a.update(d["history"].get(a["id"], {}))
+    out["alerts"] = None if d["ongoing"] is None else len(d["ongoing"])
+    out["detail"] = {"ongoing": d["ongoing"], "recent": d["recent"], "notes": d["notes"], "read_at": d["read_at"],
+                     "findings": zdx_diagnose(apps, d["ongoing"])}
     return out
 
 
@@ -941,30 +1073,131 @@ def _detectors(items):
     return out
 
 
+def ai_diagnose(d):
+    """Static checks over the AI Guard configuration; worst first. Makes no calls."""
+    found = []
+    add = lambda level, kind, subject, text: found.append({"level": level, "kind": kind, "subject": subject, "text": text})  # noqa: E731
+    pols = {p["id"]: p for p in d["policy_list"]}
+    rules = sorted(d["rules"] or [], key=lambda r: r["order"] if isinstance(r["order"], int) else 1e9)
+    used, blocker = set(), None
+    for i, r in enumerate(rules):
+        if not r["enabled"]:
+            add("info", "rule", r["name"], "Match rule is disabled, so it is never evaluated.")
+            continue
+        pol = pols.get(r["policy_id"])
+        if pol is None and d["policy_list"]:
+            add("crit", "rule", r["name"], "Points at a policy that no longer exists.")
+        elif pol is not None and not pol["enabled"]:
+            add("warn", "rule", r["name"], f"Applies policy “{pol['name']}”, which is disabled.")
+        if blocker:
+            add("warn", "rule", r["name"], f"Never reached: rule “{blocker}” has no match conditions and matches everything first.")
+            continue
+        if pol is not None:
+            used.add(pol["id"])
+        if not r["scope"] and any(x["enabled"] for x in rules[i + 1:]):
+            blocker = r["name"]
+    for p in d["policy_list"]:
+        dets = p["input"] + p["output"]
+        on = [x for x in dets if x["enabled"]]
+        if not p["enabled"]:
+            add("info", "policy", p["name"], "Policy is disabled.")
+            continue
+        if d["rules"] is not None and p["id"] not in used:
+            add("warn", "policy", p["name"], "No enabled match rule applies this policy, so it is never used.")
+        if not on:
+            add("warn", "policy", p["name"], "Has no enabled detector: prompts and responses pass unchecked.")
+        elif not any("block" in x["action"].lower() for x in on) and "block" not in p["default_action"].lower():
+            add("info", "policy", p["name"], "Detect-only: no enabled detector blocks, and the default action is not block.")
+        if p["input"] and not any(x["enabled"] for x in p["input"]):
+            add("info", "policy", p["name"], "Every prompt detector is switched off.")
+        if p["output"] and not any(x["enabled"] for x in p["output"]):
+            add("info", "policy", p["name"], "Every response detector is switched off.")
+        off = [x["detector"] for x in dets if not x["enabled"]]
+        if on and off:
+            add("info", "policy", p["name"], f"{len(off)} detector(s) switched off: {', '.join(off[:4])}{'…' if len(off) > 4 else ''}.")
+    now = time.time()
+    for cr in d["provider_credentials"] or []:
+        if cr["expires"] and cr["expires"] < now:
+            add("crit", "credential", cr["name"], "Provider credential has expired.")
+        elif cr["expires"] and cr["expires"] < now + 30 * 86400:
+            add("warn", "credential", cr["name"], f"Provider credential expires in {max(0, int((cr['expires'] - now) // 86400))} days.")
+    if d["app_list"] is not None and d["app_credentials"] is not None:
+        with_cred = {c["app_id"] for c in d["app_credentials"]}
+        for a in d["app_list"]:
+            if a["id"] not in with_cred:
+                add("info", "application", a["name"], "Has no application credential, so it cannot call AI Guard.")
+    rank = {"crit": 0, "warn": 1, "info": 2}
+    found.sort(key=lambda f: rank[f["level"]])
+    return found
+
+
 async def _aiguard(c, base, tok):
     root = f"{base}/aiguard/v1"
-    out = {"policies": None, "providers": None, "applications": None, "policy_names": [], "policy_list": [], "rules": None}
+    out = {"policies": None, "providers": None, "applications": None, "policy_names": [], "policy_list": [], "rules": None,
+           "provider_list": None, "app_list": None, "app_credentials": None, "provider_credentials": None, "notes": []}
     pols = [p for p in _as_list(await _zs_get(c, f"{root}/detections/policies", tok), "policies") if isinstance(p, dict)]
     out["policies"] = len(pols)
     out["policy_names"] = [str(p.get("name") or "") for p in pols][:50]
     names = {p.get("id"): str(p.get("name") or "") for p in pols}
     out["policy_list"] = [{
-        "name": str(p.get("name") or ""), "enabled": p.get("enabled") is not False,
-        "default_action": str(p.get("defaultAction") or ""),
+        "id": str(p.get("id") or ""), "name": str(p.get("name") or ""), "enabled": p.get("enabled") is not False,
+        "default_action": str(p.get("defaultAction") or ""), "description": str(p.get("description") or "")[:200],
+        "updated": _ts(p.get("updateTimeMillis")),
         "input": _detectors(p.get("inputDetectorPolicies")), "output": _detectors(p.get("outputDetectorPolicies")),
     } for p in pols[:50]]
-    try:
-        rules = [r for r in _as_list(await _zs_get(c, f"{root}/detections/policy-match-rules", tok), "rules") if isinstance(r, dict)]
-        out["rules"] = [{"name": str(r.get("name") or ""), "order": r.get("ruleOrder"), "enabled": r.get("enabled") is not False,
-                         "policy": names.get(r.get("policyId"), str(r.get("policyId") or "")), "type": str(r.get("type") or "")}
-                        for r in rules[:100]]
-    except httpx.HTTPError:
-        pass
-    for key, path in (("providers", "llm-providers"), ("applications", "llm-applications")):
+
+    async def opt(label, path, *keys):
         try:
-            out[key] = len(_as_list(await _zs_get(c, f"{root}/{path}", tok)))
-        except httpx.HTTPError:
-            pass
+            return [x for x in _as_list(await _zs_get(c, f"{root}/{path}", tok), *keys) if isinstance(x, dict)]
+        except httpx.HTTPStatusError as e:
+            out["notes"].append(f"{label}: HTTP {e.response.status_code}")
+        except (httpx.HTTPError, ValueError) as e:
+            out["notes"].append(f"{label}: {type(e).__name__}")
+        return None
+
+    rules = await opt("match rules", "detections/policy-match-rules", "rules")
+    provs = await opt("providers", "llm-providers", "providers")
+    apps = await opt("applications", "llm-applications", "applications")
+    acreds = await opt("application credentials", "llm-application-credentials", "credentials")
+    pcreds = await opt("provider credentials", "llm-provider-credentials", "credentials")
+    prov_names = {str(x.get("id")): str(x.get("name") or "") for x in provs or []}
+    app_names = {str(x.get("id")): str(x.get("name") or "") for x in apps or []}
+    if rules is not None:
+        def scope(r):
+            mc = r.get("matchCriteria") if isinstance(r.get("matchCriteria"), dict) else {}
+            parts = []
+            for key, label in (("llmApplications", "Application"), ("applicationGroups", "Application group"),
+                               ("sourceIpAddresses", "Source IP"), ("customRequestHeaders", "Header")):
+                vals = mc.get(key) if mc.get(key) else r.get(key)
+                for v in (vals if isinstance(vals, list) else [])[:8]:
+                    text = app_names.get(str(v.get("id") if isinstance(v, dict) else v)) if key == "llmApplications" else None
+                    parts.append(f"{label}: {text or _nm(v) or v}"[:100])
+            for v in (r.get("applicationCredentialsIds") or [])[:8]:
+                parts.append(f"Credential: {v}"[:100])
+            if r.get("applicationId"):
+                parts.append("Application: " + (app_names.get(str(r["applicationId"])) or str(r["applicationId"])))
+            return parts
+        out["rules"] = [{"name": str(r.get("name") or ""), "order": r.get("ruleOrder"), "enabled": r.get("enabled") is not False,
+                         "policy_id": str(r.get("policyId") or ""), "policy": names.get(r.get("policyId"), str(r.get("policyId") or "")),
+                         "type": str(r.get("type") or ""), "scope": scope(r)} for r in rules[:100]]
+    if provs is not None:
+        out["providers"] = len(provs)
+        out["provider_list"] = [{"id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "type": str(x.get("type") or ""),
+                                 "public": bool(x.get("public")), "updated": _ts(x.get("updateTimeMillis"))} for x in provs[:100]]
+    if apps is not None:
+        out["applications"] = len(apps)
+        out["app_list"] = [{"id": str(x.get("id") or ""), "name": str(x.get("name") or ""), "owner": str(x.get("ownerEmail") or ""),
+                            "logs_content": bool(x.get("includeEventContents")), "encrypts_content": bool(x.get("encryptEventContents")),
+                            "updated": _ts(x.get("updateTimeMillis"))} for x in apps[:200]]
+    # Credentials: names, links and expiry only. Key material is never copied out of the reply.
+    if acreds is not None:
+        out["app_credentials"] = [{"name": str(x.get("name") or ""), "app_id": str(x.get("applicationId") or ""),
+                                   "app": app_names.get(str(x.get("applicationId")), ""), "provider": prov_names.get(str(x.get("providerId")), ""),
+                                   "mode": str(x.get("mode") or ""), "updated": _ts(x.get("updateTimeMillis"))} for x in acreds[:200]]
+    if pcreds is not None:
+        out["provider_credentials"] = [{"name": str(x.get("name") or ""), "provider": prov_names.get(str(x.get("providerId")), ""),
+                                        "type": str(x.get("type") or ""), "expires": _ts(x.get("expireTimeMillis"))} for x in pcreds[:200]]
+    out["findings"] = ai_diagnose(out)
     return out
 
 

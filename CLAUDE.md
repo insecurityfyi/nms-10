@@ -21,6 +21,14 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
     `ZPA_DETAIL_TTL` (5 min) because of rate limits. `zpa_diagnose` is a pure function over that config:
     shadowed rules, rules matching anyone, stale references, segments no rule allows or no connected
     connector serves. ZPA's API has no sessions or per-user app usage; that is only in log streaming (LSS).
+  - ZDX detail (`_zdx`, page `vZdx`): app scores every poll; ongoing and 24-hour alerts, and score history plus
+    metrics (`/apps/<id>/score`, `/apps/<id>/metrics`, since=24) for the `ZDX_MAX_APPS` lowest-scoring apps are
+    cached for `ZDX_DETAIL_TTL` (10 min). `zdx_diagnose` flags poor or dropping scores and ongoing alerts. The page
+    reuses `state.zdx_users` for the poorest-experience users.
+  - AI Security (`_aiguard`, page `vAi`): policies, match rules with their criteria, providers, applications and
+    credential names/expiry (key material is never copied out of the reply). `ai_diagnose` flags unreachable
+    rules, missing or disabled policies, unused or detector-less policies, expiring credentials. The AI Guard API
+    has no usage statistics; "AI applications in use" comes from Z-Insights apps matched by category and name.
   - Zscaler Zero Trust Branch (former Airgap; not in OneAPI): `collect_ztb`, API key login at
     `https://<tenant>.goairgap.com/api/v3/api-key-auth/login` -> `result.delegate_token` (Bearer), then GET
     `/api/v2/Site/`, `/api/v2/Site/siteByID/<id>/overview`, `/api/v2/devices/active`, `/api/v2/alarm`.

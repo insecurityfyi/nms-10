@@ -11,6 +11,10 @@ Read-only monitoring dashboard for a small network:
 - **Private Access (ZPA) page**: app segments, the access policy in evaluation order, rule diagnostics
   (shadowed rules, rules that match anyone, segments nothing allows or no connector serves), users with
   Private Access on (from Client Connector), identity providers and groups, connector and logging status
+- **Digital Experience (ZDX) page**: application scores with 24-hour history and metrics, ongoing and recent
+  alerts, diagnostics, and the users with the poorest experience
+- **AI Security page**: AI Guard match rules, policies and detectors, rule and policy diagnostics, providers,
+  applications and credential expiry, plus AI applications seen in web traffic
 - **Zscaler Zero Trust Branch** (formerly Airgap) via OneAPI or its own API key: sites, gateways, devices,
   signed-in users and alarms, with bandwidth utilization from SNMP on the branch appliance
 - **Zscaler activity** (Z-Insights): web transactions allowed and blocked, blocked threat
