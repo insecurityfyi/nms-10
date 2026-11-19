@@ -38,7 +38,7 @@ tr:last-child td{border-bottom:0}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line2);font-size:13px}.kv:last-child{border-bottom:0}
 .grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
 .inset{background:var(--inset);border-radius:8px;padding:14px 16px}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px}
 .inset .k{color:var(--mute);font-size:12px;margin-bottom:4px}
 .bar{height:6px;background:#232B36;border-radius:3px;margin-top:4px}.bar>i{display:block;height:6px;border-radius:3px;background:var(--accent)}.bar>i.hot{background:var(--warn)}
 .node{display:grid;grid-template-columns:90px repeat(3,minmax(0,1fr));gap:14px;align-items:center;font-size:12px;margin-bottom:14px}
@@ -160,7 +160,7 @@ async function refresh(force) {
 /* ---------- layout ---------- */
 const NAV = [[null, [["overview", "Overview"], ["alerts", "Alerts"], ["endpoints", "Endpoints"]]],
   ["Infrastructure", [["snmp", "SNMP devices"], ["unifi", "Ubiquiti UniFi"], ["proxmox", "Proxmox VE"], ["firewalla", "Firewalla"]]],
-  ["Zscaler", [["zscaler", "Zscaler"], ["zpa", "Private Access"], ["ztb", "Zero Trust Branch"]]],
+  ["Zscaler", [["zscaler", "Zscaler"], ["zpa", "Private Access"], ["zdx", "Digital Experience"], ["ai", "AI Security"], ["ztb", "Zero Trust Branch"]]],
   ["Admin", [["settings", "Settings & credentials"]]]];
 function navEl() {
   const n = state ? state.alerts.length : 0;
@@ -172,13 +172,13 @@ function navEl() {
       $("a", {href: "#", onclick: async ev => { ev.preventDefault(); await api("/api/logout", "POST", {}).catch(() => {}); stop(); boot(); }}, "Sign out")));
 }
 function renderNav() { const old = document.getElementById("nav"); if (old) old.replaceWith(navEl()); }
-const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", zpa: "Private Access (ZPA)", ztb: "Zero Trust Branch", settings: "Settings & credentials"};
+const TITLES = {overview: "Overview", alerts: "Alerts", endpoints: "Endpoints", snmp: "SNMP devices", unifi: "Ubiquiti UniFi", proxmox: "Proxmox VE", firewalla: "Firewalla", zscaler: "Zscaler", zpa: "Private Access (ZPA)", zdx: "Digital Experience (ZDX)", ai: "AI Security", ztb: "Zero Trust Branch", settings: "Settings & credentials"};
 function render() {
   if (!state) return;
   if (!TITLES[view]) view = "overview";
   const keep = {}; document.querySelectorAll(".tree").forEach(t => { keep[t.id] = t.scrollLeft; });
   const act = document.activeElement, actId = act && act.id, caret = act && act.tagName === "INPUT" ? act.selectionStart : null;
-  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, zpa: vZpa, ztb: vZtb, settings: vSettings}[view]();
+  const body = {overview: vOverview, alerts: vAlerts, endpoints: vEndpoints, snmp: vSnmp, unifi: vUnifi, proxmox: vProxmox, firewalla: vFirewalla, zscaler: vZscaler, zpa: vZpa, zdx: vZdx, ai: vAi, ztb: vZtb, settings: vSettings}[view]();
   const sub = state.updated ? "Last poll " + ago(state.updated) + " ago · every " + state.interval + " s" : "Waiting for the first poll";
   app.replaceChildren($("div", {class: "shell"}, navEl(), $("main", null,
     $("header", null, $("div", {class: "grow"}, $("h1", null, TITLES[view]), $("div", {class: "mute"}, sub)),
@@ -610,6 +610,108 @@ function vZscaler() {
     $("tbody", null, zdx.apps.map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", {class: "mono " + (a.score == null ? "mute" : a.score >= 66 ? "ok" : a.score >= 34 ? "warn" : "crit")}, a.score == null ? dash : (a.score >= 66 ? "● " : a.score >= 34 ? "▲ " : "✕ ") + a.score), $("td", {class: "mono"}, a.users == null ? dash : a.users))))))));
   out.push(aiPolicies() || (ai.ok && ai.policy_names.length ? $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "AI Guard detection policies")), ai.policy_names.map(n => $("div", {class: "kv"}, $("span", null, n)))) : null));
   return out;
+}
+
+/* ---------- shared: findings table for the Zscaler product pages ---------- */
+const LV = {crit: ["✕", "crit", "Problem"], warn: ["▲", "warn", "Warning"], info: ["○", "mute", "Note"]};
+const showNotes = {};
+function findingsCard(key, title, F, note) {
+  const nInfo = F.filter(f => f.level === "info").length, shown = F.filter(f => showNotes[key] || f.level !== "info");
+  return $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, title), nInfo ? $("button", {type: "button", "aria-pressed": showNotes[key] ? "true" : "false", onclick: () => { showNotes[key] = !showNotes[key]; render(); }}, (showNotes[key] ? "Hide " : "Show ") + nInfo + " note" + (nInfo === 1 ? "" : "s")) : null),
+    shown.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Level", "About", "Name", "Finding"].map(h => $("th", null, h)))),
+      $("tbody", null, shown.slice(0, 200).map(f => $("tr", null, $("td", {class: LV[f.level][1], style: "font-weight:600"}, LV[f.level][0] + " " + LV[f.level][2]), $("td", {class: "mute"}, f.kind.charAt(0).toUpperCase() + f.kind.slice(1)), $("td", {style: "font-weight:500"}, f.subject), $("td", {style: "white-space:normal;min-width:320px"}, f.text))))))
+      : $("div", {class: "empty"}, F.length ? "No problems or warnings. " + nInfo + " informational note" + (nInfo === 1 ? "" : "s") + " hidden." : "Nothing flagged."),
+    note ? $("p", {class: "note"}, note) : null);
+}
+const pbox = (k, v, sub, cls) => $("div", {class: "tile"}, $("div", {class: "k"}, k), $("div", {class: "v"}, v), $("div", {class: "s " + (cls || "mute")}, sub || " "));
+const findTile = F => { const c = F.filter(f => f.level === "crit").length, w = F.filter(f => f.level === "warn").length; return pbox("Findings", c + w, c ? "✕ " + c + " problem" + (c === 1 ? "" : "s") : w ? "▲ warnings only" : "● Nothing flagged", c ? "crit" : w ? "warn" : "ok"); };
+
+/* ---------- Digital Experience (ZDX) ---------- */
+const zx = {app: ""};
+function vZdx() {
+  const bad = notReady("zdx", "ZDX"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("zdx"), d = s.detail || {findings: [], ongoing: null, recent: null, notes: [], read_at: null}, apps = s.apps.slice().sort((a, b) => (a.score == null) - (b.score == null) || a.score - b.score);
+  const u = (state.zdx_users || {})[zu.range], label = ZU_RANGES.find(r => r[0] === zu.range);
+  const poor = apps.filter(a => a.score != null && a.score < 34).length, fair = apps.filter(a => a.score != null && a.score >= 34 && a.score < 66).length;
+  const tiles = $("section", {class: "tiles", "aria-label": "Digital Experience totals"},
+    pbox("Overall score", s.score == null ? dash : s.score, s.score == null ? "No data" : s.score >= 66 ? "● Good" : s.score >= 34 ? "▲ Fair" : "✕ Poor", scoreCls(s.score)),
+    pbox("Applications", apps.length, poor ? "✕ " + poor + " poor" : fair ? "▲ " + fair + " fair" : "● All good", poor ? "crit" : fair ? "warn" : "ok"),
+    pbox("Ongoing alerts", d.ongoing == null ? dash : d.ongoing.length, d.ongoing == null ? "Not readable" : d.ongoing.length ? "▲ Active now" : "● None", d.ongoing == null ? "mute" : d.ongoing.length ? "warn" : "ok"),
+    pbox("Alerts, 24 hours", d.recent == null ? dash : d.recent.length, d.recent == null ? "Not readable" : "Started or ended"),
+    pbox("Active users", u && u.ok !== false && u.total != null ? u.total : dash, label[2].replace(/^l/, "L")),
+    findTile(d.findings));
+  const sel = apps.find(a => a.id === zx.app);
+  const appDetail = sel && $("div", {class: "inset", style: "margin-bottom:14px"}, $("div", {class: "head"}, $("strong", null, sel.name), $("button", {type: "button", onclick: () => { zx.app = ""; render(); }}, "Close")),
+    $("div", {class: "grid4"},
+      $("div", null, kv("Score now", sel.score == null ? null : scoreTxt(sel.score), scoreCls(sel.score)), kv("24-hour average", sel.avg == null ? null : scoreTxt(sel.avg), scoreCls(sel.avg)), kv("24-hour low", sel.low == null ? null : scoreTxt(sel.low), scoreCls(sel.low)), kv("Most affected region", sel.region || null)),
+      $("div", null, kv("Users measured", sel.users), kv("Active users", sel.active_users), kv("Active devices", sel.active_devices), kv("Good / fair / poor", sel.good == null ? null : sel.good + " / " + sel.okay + " / " + sel.poor)),
+      $("div", null, $("div", {class: "k"}, "Metrics, last 24 hours"), sel.metrics.length ? simpleTable(["Metric", "Latest", "Average", "Worst"], sel.metrics.map(m => [m.name.toUpperCase(), m.last + " " + m.unit, m.avg + " " + m.unit, m.max + " " + m.unit])) : $("div", {class: "mute"}, "History is loaded for the " + 10 + " lowest-scoring applications only."))));
+  const appsCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Applications"), $("span", {class: "mute"}, "Lowest score first")), appDetail,
+    apps.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Application", "Score", "24h average", "24h low", "Users", "Good / fair / poor", "Most affected region", "Key metrics, latest"].map(h => $("th", null, h)))),
+      $("tbody", null, apps.map(a => $("tr", null,
+        $("td", null, $("button", {type: "button", style: "min-height:32px;padding:0 10px;font-weight:500" + (zx.app === a.id ? ";border-color:var(--accent)" : ""), "aria-pressed": zx.app === a.id ? "true" : "false", onclick: () => { zx.app = zx.app === a.id ? "" : a.id; render(); }}, a.name || "(unnamed)")),
+        $("td", {class: "mono " + scoreCls(a.score), style: "font-weight:600"}, scoreTxt(a.score)), $("td", {class: "mono " + scoreCls(a.avg)}, a.avg == null ? dash : a.avg), $("td", {class: "mono " + scoreCls(a.low)}, a.low == null ? dash : a.low),
+        $("td", {class: "mono"}, a.users == null ? dash : a.users), $("td", {class: "mono"}, a.good == null ? dash : [a.good + " / " + a.okay + " / ", $("span", {class: a.poor ? "crit" : ""}, String(a.poor))]),
+        $("td", null, a.region || dash), $("td", {class: "mono mute", style: "white-space:normal;min-width:200px"}, a.metrics.length ? a.metrics.slice(0, 3).map(m => m.name.toUpperCase() + " " + m.last + " " + m.unit).join(" · ") : dash)))))) : $("div", {class: "empty"}, "No applications are being monitored."));
+  const when = t => t ? new Date(t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : dash;
+  const grp = list => list.length ? list.slice(0, 3).map(g => g.name + (g.devices == null ? "" : " (" + g.devices + ")")).join(", ") + (list.length > 3 ? " +" + (list.length - 3) : "") : dash;
+  const alertRows = list => $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Rule", "Severity", "Application", "Started", "Ended", "Devices", "Locations", "Departments"].map(h => $("th", null, h)))),
+    $("tbody", null, list.map(a => $("tr", null, $("td", {style: "font-weight:500;white-space:normal;min-width:200px"}, a.rule || dash, a.type ? $("div", {class: "mute", style: "font-weight:400"}, a.type) : null), $("td", {class: /crit|high/i.test(a.severity) ? "crit" : /warn|med/i.test(a.severity) ? "warn" : "mute", style: "font-weight:600"}, a.severity || dash),
+      $("td", null, a.app || dash), $("td", {class: "mono mute"}, when(a.started)), $("td", {class: "mono mute"}, a.ended ? when(a.ended) : a.status === "Ongoing" ? "Ongoing" : dash), $("td", {class: "mono"}, a.devices == null ? dash : a.devices), $("td", {style: "white-space:normal"}, grp(a.locations.length ? a.locations : a.geo)), $("td", {style: "white-space:normal"}, grp(a.departments)))))));
+  const alerts = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Alerts")),
+    $("div", {style: "font-weight:600;margin-bottom:8px"}, "Ongoing"), d.ongoing == null ? $("div", {class: "mute"}, "Not readable with this API client.") : d.ongoing.length ? alertRows(d.ongoing) : $("div", {class: "mute"}, "None."),
+    $("div", {style: "font-weight:600;margin:16px 0 8px"}, "Last 24 hours"), d.recent == null ? $("div", {class: "mute"}, "Not readable with this API client.") : d.recent.length ? alertRows(d.recent) : $("div", {class: "mute"}, "None."));
+  /* users with the poorest experience, from the user data already loaded for the chosen range */
+  const worst = u && u.ok !== false ? (u.users || []).map(x => { const sc = x.devices.map(v => v.score).filter(v => v != null); const bad = [].concat.apply([], x.devices.map(v => v.apps)).filter(a => a.score < 66).sort((a, b) => a.score - b.score);
+    return {name: x.name || x.email, email: x.email, score: sc.length ? Math.min.apply(null, sc) : null, where: [].concat.apply([], x.devices.map(v => v.locations.length ? v.locations : v.geo)).filter((v, i, a) => v && a.indexOf(v) === i), apps: bad}; }).filter(x => x.score != null && x.score < 66).sort((a, b) => a.score - b.score) : [];
+  const usersCard = $("section", {class: "card"}, $("div", {class: "head", style: "align-items:center;flex-wrap:wrap"}, $("h2", null, "Users with the poorest experience · " + label[1]), rangePicker()),
+    !u ? $("div", {class: "empty"}, "Loading users for the " + label[2] + "… this can take a few minutes the first time.") : u.ok === false ? $("div", {class: "warn"}, "▲ " + (u.error || "Could not load users"))
+      : worst.length ? simpleTable(["User", "Lowest device score", "Where", "Applications below good"], worst.slice(0, 50).map(x => [x.name, $("td", {class: "mono " + scoreCls(x.score), style: "font-weight:600"}, scoreTxt(x.score)), x.where.slice(0, 2).join("; ") || dash, $("td", {style: "white-space:normal;min-width:240px"}, x.apps.slice(0, 4).map(a => a.name + " " + a.score).join(", ") || dash)]))
+      : $("div", {class: "empty"}, "No user with loaded scores is below good (66) in the " + label[2] + "."),
+    u && u.ok !== false ? $("p", {class: "note"}, u.total + " users active in the " + label[2] + "; scores are loaded for " + u.detailed + " of them" + (u.limited ? " (Zscaler rate limit reached)" : "") + ".") : null);
+  const foot = $("p", {class: "note"}, "Scores refresh every poll. Score history, metrics and alert detail refresh every 10 minutes" + (d.read_at ? " (read " + ago(d.read_at) + " ago)" : "") + ", to stay inside ZDX rate limits." + (d.notes.length ? " Not available: " + d.notes.join("; ") + "." : ""));
+  return [tiles, findingsCard("zdx", "Diagnostics", d.findings, "Built from application scores, their 24-hour history and ongoing alerts. Device-level traces (network path, Wi-Fi, CPU) are not read here."), appsCard, alerts, usersCard, zdxUsers(), foot];
+}
+
+/* ---------- AI Security ---------- */
+function vAi() {
+  const bad = notReady("aiguard", "AI Security"); if (bad) return $("section", {class: "card"}, bad);
+  const s = src("aiguard"), F = s.findings || [], rules = (s.rules || []).slice().sort((a, b) => (a.order == null ? 1e9 : a.order) - (b.order == null ? 1e9 : b.order));
+  const ins = (state.zs_insights || {})[zu.range], label = ZU_RANGES.find(r => r[0] === zu.range);
+  const isAi = a => /\bAI\b|artificial intelligence|machine learning|\bML\b|generative|\bLLM\b|chatbot|copilot|\bGPT/i.test(a.category + " " + a.name);
+  const aiApps = ins && ins.ok !== false && ins.apps ? ins.apps.filter(isAi) : null;
+  const tiles = $("section", {class: "tiles", "aria-label": "AI Security totals"},
+    pbox("Policies", s.policies == null ? dash : s.policies, (s.policy_list || []).filter(p => !p.enabled).length ? (s.policy_list || []).filter(p => !p.enabled).length + " disabled" : "All enabled"),
+    pbox("Match rules", s.rules == null ? dash : rules.length, s.rules == null ? "Not readable" : rules.filter(r => !r.enabled).length ? rules.filter(r => !r.enabled).length + " disabled" : "All enabled"),
+    pbox("Model providers", s.providers == null ? dash : s.providers, s.providers == null ? "Not readable" : "Configured"),
+    pbox("Applications", s.applications == null ? dash : s.applications, s.applications == null ? "Not readable" : "Protected by AI Guard"),
+    pbox("AI apps in use", aiApps == null ? dash : aiApps.length, aiApps == null ? "No traffic analytics" : "Seen in web traffic · " + label[1]),
+    findTile(F));
+  const dets = list => list.length ? list.map(x => $("div", {class: x.enabled ? "" : "mute"}, x.detector || "Detector", $("span", {class: /block/i.test(x.action) ? "warn" : "mute"}, " → " + (x.action ? x.action.charAt(0) + x.action.slice(1).toLowerCase() : "no action")), x.severity ? $("span", {class: "mute"}, " · " + x.severity.toLowerCase()) : null, x.enabled ? null : " (off)")) : $("span", {class: "mute"}, "None");
+  const rulesCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Match rules"), $("span", {class: "mute"}, "Evaluated in order; the first match picks the policy")),
+    s.rules == null ? $("div", {class: "empty"}, "Match rules could not be read with this API client.") : rules.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["#", "Rule", "Applies to", "Policy", "Type", "State"].map(h => $("th", null, h)))),
+      $("tbody", null, rules.map(r => $("tr", {style: r.enabled ? "" : "opacity:.6"}, $("td", {class: "mono"}, r.order == null ? dash : r.order), $("td", {style: "font-weight:500"}, r.name || "(unnamed)"), $("td", {style: "white-space:normal;min-width:220px"}, r.scope.length ? r.scope.map(x => $("div", null, x)) : $("span", {class: "mute"}, "Everything")),
+        (s.policy_list || []).length && !s.policy_list.some(p => p.id === r.policy_id) ? $("td", {class: "crit"}, "✕ Missing policy") : $("td", null, r.policy || dash), $("td", {class: "mute"}, r.type || dash), $("td", null, r.enabled ? "Enabled" : "Disabled")))))) : $("div", {class: "empty"}, "No match rules."));
+  const polCard = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Policies and detectors")),
+    (s.policy_list || []).length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Policy", "State", "Default action", "Prompt detectors → action", "Response detectors → action", "Used by rules"].map(h => $("th", null, h)))),
+      $("tbody", null, s.policy_list.map(p => { const n = rules.filter(r => r.enabled && r.policy_id === p.id).length; return $("tr", {style: p.enabled ? "" : "opacity:.6"}, $("td", {style: "font-weight:500;vertical-align:top;white-space:normal;min-width:160px"}, p.name, p.description ? $("div", {class: "mute", style: "font-weight:400"}, p.description) : null), $("td", {style: "vertical-align:top"}, p.enabled ? "Enabled" : "Disabled"), $("td", {style: "vertical-align:top"}, p.default_action || dash),
+        $("td", {style: "vertical-align:top;white-space:normal"}, dets(p.input)), $("td", {style: "vertical-align:top;white-space:normal"}, dets(p.output)), $("td", {class: "mono " + (s.rules != null && !n && p.enabled ? "warn" : ""), style: "vertical-align:top"}, s.rules == null ? dash : n)); })))) : $("div", {class: "empty"}, "No policies."));
+  const day = t => t ? new Date(t * 1000).toLocaleDateString([], {year: "numeric", month: "short", day: "numeric"}) : dash, nowS = Date.now() / 1000;
+  const na = $("div", {class: "mute"}, "Not readable with this API client."), none = $("div", {class: "mute"}, "None.");
+  const inv = $("section", {class: "card"}, $("div", {class: "head"}, $("h2", null, "Applications, providers and credentials")),
+    $("div", {class: "grid2"},
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Protected applications"), s.app_list == null ? na : s.app_list.length ? simpleTable(["Application", "Owner", "Logs content", "Credentials"], s.app_list.map(a => [a.name, a.owner || dash, a.logs_content ? (a.encrypts_content ? "Yes, encrypted" : "Yes") : "No", s.app_credentials == null ? dash : String(s.app_credentials.filter(c => c.app_id === a.id).length)])) : none),
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Model providers"), s.provider_list == null ? na : s.provider_list.length ? simpleTable(["Provider", "Type", "Scope", "Updated"], s.provider_list.map(x => [x.name, x.type || dash, x.public ? "Public" : "Private", day(x.updated)])) : none),
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Application credentials"), s.app_credentials == null ? na : s.app_credentials.length ? simpleTable(["Credential", "Application", "Provider", "Mode"], s.app_credentials.map(c => [c.name, c.app || dash, c.provider || dash, c.mode || dash])) : none),
+      $("div", null, $("div", {style: "font-weight:600;margin-bottom:8px"}, "Provider credentials"), s.provider_credentials == null ? na : s.provider_credentials.length ? simpleTable(["Credential", "Provider", "Type", "Expires"], s.provider_credentials.map(c => [c.name, c.provider || dash, c.type || dash, $("td", {class: "mono " + (c.expires && c.expires < nowS ? "crit" : c.expires && c.expires < nowS + 2592000 ? "warn" : "mute")}, c.expires ? (c.expires < nowS ? "✕ Expired " : c.expires < nowS + 2592000 ? "▲ " : "") + day(c.expires) : "No expiry")])) : none)),
+    $("p", {class: "note"}, "Names and expiry only. Keys and secrets are never stored or shown by this app." + ((s.notes || []).length ? " Not available with this API client: " + s.notes.join("; ") + "." : "")));
+  const usage = $("section", {class: "card"}, $("div", {class: "head", style: "align-items:center;flex-wrap:wrap"}, $("h2", null, "AI applications in use · " + label[1]), rangePicker()),
+    !ins ? $("div", {class: "empty"}, "Loading traffic analytics for the " + label[2] + "…") : ins.configured === false ? $("div", {class: "empty"}, "Traffic analytics (Z-Insights) is switched off in Settings, so AI application usage is not available.") : ins.ok === false ? $("div", {class: "warn"}, "▲ " + (ins.error || "Could not load traffic analytics"))
+      : aiApps && aiApps.length ? $("div", {class: "scroll"}, $("table", null, $("thead", null, $("tr", null, ["Application", "Category", "State", "Risk", "Users", "Uploaded", "Downloaded", "Total"].map(h => $("th", null, h)))),
+        $("tbody", null, aiApps.slice(0, 100).map(a => $("tr", null, $("td", {style: "font-weight:500"}, a.name), $("td", null, a.category || dash), $("td", {class: /unsanction/i.test(a.state) ? "warn" : ""}, a.state ? a.state.charAt(0) + a.state.slice(1).toLowerCase().replace(/_/g, " ") : dash), $("td", {class: "mono " + (a.risk >= 4 ? "crit" : a.risk >= 3 ? "warn" : "")}, a.risk == null ? dash : a.risk),
+          $("td", {class: "mono"}, a.users == null ? dash : num(a.users)), $("td", {class: "mono"}, bytes(a.upload)), $("td", {class: "mono"}, bytes(a.download)), $("td", {class: "mono"}, bytes(a.bytes))))))) : $("div", {class: "empty"}, "No AI application appears among the top applications by traffic in the " + label[2] + "."),
+    $("p", {class: "note"}, "This is web traffic to AI applications seen by Zscaler Internet Access (from Z-Insights, top 200 applications by data), matched by category and name. It is separate from AI Guard: the AI Guard API returns configuration only, with no count of how often a policy or detector fired."));
+  return [tiles, findingsCard("ai", "Rule and policy diagnostics", F, "These checks read the AI Guard configuration: rules that are never reached or point at missing or disabled policies, policies nothing uses, policies with no active or no blocking detector, and expiring credentials."), rulesCard, polCard, inv, usage];
 }
 
 /* ---------- Private Access (ZPA) ---------- */
