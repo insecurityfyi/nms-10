@@ -1005,17 +1005,65 @@ def _names(value):
     return out
 
 
-async def _ztb_login(c, base, api_key, key):
+class ZtbAuthError(Exception):
+    """No way of presenting the API key was accepted; str() lists what each attempt returned."""
+
+
+def _ztb_reply(r, api_key):
+    """Status plus a short, key-free excerpt of the body, to tell a gateway refusal from a bad key."""
+    text = " ".join((r.text or "").split()).replace(api_key, "***")[:90]
+    return f"HTTP {r.status_code}" + (f" ({text})" if text else "")
+
+
+async def _ztb_login(c, base, api_key):
+    """Exchange the API key for a session token. Returns (token or None, description of the reply)."""
     r = await c.post(base + "/api/v3/api-key-auth/login", json={"api_key": api_key},
                      headers={"Accept": "application/json"})
-    r.raise_for_status()
-    body = r.json()
-    tok = (body.get("result") or {}).get("delegate_token") if isinstance(body, dict) and isinstance(body.get("result"), dict) else None
-    if not tok:
-        raise ValueError("Sign-in succeeded but no token was returned")
+    if r.status_code >= 400:
+        return None, _ztb_reply(r, api_key)
+    try:
+        body = r.json()
+    except ValueError:
+        return None, "HTTP 200 but not JSON"
+    res = body.get("result") if isinstance(body, dict) else None
+    tok = res.get("delegate_token") if isinstance(res, dict) else None
+    return (tok, "ok") if tok else (None, "HTTP 200 but no delegate_token in the reply")
+
+
+async def _ztb_auth(c, base, api_key, key, fresh=False):
+    """Work out how this tenant takes the API key, and cache the answer.
+
+    The documented way is a login call that swaps the key for a token. Tenants run from the main
+    Zscaler console publish their API under api.zsapi.net/private/..., which is the console's own
+    session route, so the same paths are also tried without /private, and the key is tried directly
+    as a Bearer token and as an x-api-key header. Returns {"base", "headers", "how"}.
+    """
+    hit = _ztb_tokens.get(key)
+    if hit and hit["until"] > time.time() and not fresh:
+        return hit
+    bases = [base] + ([base.replace("/private/", "/", 1)] if "/private/" in base + "/" else [])
+    tried = []
+    for b in bases:
+        where = b.split("://", 1)[1]
+        tok, said = await _ztb_login(c, b, api_key)
+        if tok:
+            found = {"base": b, "headers": {"Authorization": "Bearer " + tok}, "how": "login", "until": time.time() + 1800}
+            break
+        tried.append(f"login at {where}: {said}")
+        for how, headers in (("key as Bearer token", {"Authorization": "Bearer " + api_key}), ("key as x-api-key", {"x-api-key": api_key})):
+            r = await c.get(b + "/api/v2/Site/names", headers={**headers, "Accept": "application/json"})
+            if r.status_code < 400:
+                found = {"base": b, "headers": headers, "how": how, "until": time.time() + 86400}
+                break
+            tried.append(f"{how} at {where}: {_ztb_reply(r, api_key)}")
+        else:
+            continue
+        break
+    else:
+        raise ZtbAuthError("; ".join(tried))
     _ztb_tokens.clear()
-    _ztb_tokens[key] = (tok, time.time() + 1800)
-    return tok
+    _ztb_tokens[key] = found
+    return found
 
 
 async def collect_ztb(cfg):
@@ -1047,24 +1095,28 @@ async def collect_ztb(cfg):
         async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             try:
                 if direct:
-                    cached = _ztb_tokens.get(key)
-                    state = {"tok": cached[0] if cached and cached[1] > time.time() else await _ztb_login(c, base, b["api_key"], key)}
+                    auth = await _ztb_auth(c, base, b["api_key"], key)
+                    root = base = auth["base"]
                 else:
-                    state = {"tok": await _zs_token(c, z)}
+                    auth = {"headers": {"Authorization": "Bearer " + await _zs_token(c, z)}, "how": "oneapi"}
+            except ZtbAuthError as e:
+                return {"configured": True, "ok": False, "error":
+                        "Zero Trust Branch did not accept the API key. Tried: " + str(e) + ". If every attempt says "
+                        "401, check that the key is the full secret from Zero Trust Branch API Keys and is still active."}
             except httpx.HTTPStatusError as e:
-                hint = (" Check the API key." if direct else " Check the Zscaler client ID and secret.") if e.response.status_code in (400, 401, 403) else ""
+                hint = " Check the Zscaler client ID and secret." if e.response.status_code in (400, 401, 403) else ""
                 return {"configured": True, "ok": False, "error": "Sign-in failed: " + _err(e) + "." + hint}
             except httpx.ConnectError as e:
                 host = _ztb_base(b["cloud"]).split("://", 1)[1] if direct else f"{z['vanity']}.zslogin{z['cloud']}.net"
                 return {"configured": True, "ok": False, "error":
                         f"Sign-in failed: cannot reach {host} ({str(e)[:80]}). Check the API address."}
+            state = {"auth": auth}
 
             async def get(path, params=None):
                 for attempt in (0, 1):
-                    r = await c.get(base + path, params=params,
-                                    headers={"Authorization": "Bearer " + state["tok"], "Accept": "application/json"})
-                    if r.status_code == 401 and attempt == 0 and direct:  # token expired: sign in again, once
-                        state["tok"] = await _ztb_login(c, base, b["api_key"], key)
+                    r = await c.get(base + path, params=params, headers={**state["auth"]["headers"], "Accept": "application/json"})
+                    if r.status_code == 401 and attempt == 0 and state["auth"]["how"] == "login":  # token expired: sign in again, once
+                        state["auth"] = await _ztb_auth(c, state["auth"]["base"], b["api_key"], key, fresh=True)
                         continue
                     r.raise_for_status()
                     return r.json()
