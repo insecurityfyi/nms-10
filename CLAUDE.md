@@ -14,6 +14,13 @@ Read-only monitoring dashboard for a small network. GitHub: insecurityfyi/nms-10
   - Firewalla MSP API: `Authorization: Token <token>`, `https://<msp domain>/v2/{boxes,devices,alarms}`
   - Zscaler OneAPI: token from `https://<vanity>.zslogin<cloud>.net/oauth2/v1/token`,
     then `/zia/api/v1`, `/zpa/mgmtconfig/v1/admin/customers/<id>`, `/zdx/v1`, `/aiguard/v1`, `/ztw/api/v1/ecgroup`
+  - ZPA detail (`_zpa`, page `vZpa`): connectors every poll; app segments, segment/server/connector groups,
+    access rules (`/policySet/rules/policyType/ACCESS_POLICY`), IdPs (`v2/idp`), SCIM groups
+    (`/zpa/userconfig/v1/customers/<id>/scimgroup/idpId/<idp>`), log receivers (`v2/lssConfig`) and Client
+    Connector devices (`/zcc/papi/public/v1/getDevices`, the only source of ZPA users) are cached for
+    `ZPA_DETAIL_TTL` (5 min) because of rate limits. `zpa_diagnose` is a pure function over that config:
+    shadowed rules, rules matching anyone, stale references, segments no rule allows or no connected
+    connector serves. ZPA's API has no sessions or per-user app usage; that is only in log streaming (LSS).
   - Zscaler Zero Trust Branch (former Airgap; not in OneAPI): `collect_ztb`, API key login at
     `https://<tenant>.goairgap.com/api/v3/api-key-auth/login` -> `result.delegate_token` (Bearer), then GET
     `/api/v2/Site/`, `/api/v2/Site/siteByID/<id>/overview`, `/api/v2/devices/active`, `/api/v2/alarm`.

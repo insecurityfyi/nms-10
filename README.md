@@ -8,6 +8,9 @@ Read-only monitoring dashboard for a small network:
 - **Firewalla** via the MSP API: boxes, device counts, active alarms
 - **Zscaler** via OneAPI: ZIA, ZPA, ZDX, AI Security (AI Guard) and Cloud & Branch Connector, including the
   Zscaler data center each connector is attached to
+- **Private Access (ZPA) page**: app segments, the access policy in evaluation order, rule diagnostics
+  (shadowed rules, rules that match anyone, segments nothing allows or no connector serves), users with
+  Private Access on (from Client Connector), identity providers and groups, connector and logging status
 - **Zscaler Zero Trust Branch** (formerly Airgap) via OneAPI or its own API key: sites, gateways, devices,
   signed-in users and alarms, with bandwidth utilization from SNMP on the branch appliance
 - **Zscaler activity** (Z-Insights): web transactions allowed and blocked, blocked threat
